@@ -67,7 +67,7 @@
 
   <rect class="node" x="540" y="500" width="350" height="160"/>
   <text class="title" x="564" y="534">Base Positive Prompt</text>
-  <text class="small" x="564" y="564">Prompt is linked from KJ prompt output.</text>
+  <text class="small" x="564" y="564">Use clean text here. Do not link KJ prompt output.</text>
   <text class="small" x="564" y="590">Dummy fallback text:</text>
   <text class="small" x="564" y="614">lface woman in the left bbox, sface man in the</text>
   <text class="small" x="564" y="634">right bbox, two separate people, distinct faces.</text>

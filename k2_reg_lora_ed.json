@@ -131,15 +131,15 @@
       },
       "widgets_values": [
         "krearaw_merged.safetensors",
-        1,
-        1,
-        0.1,
-        0.95,
+        1.5,
+        1.25,
+        0.0,
+        1.0,
         true,
-        true,
+        false,
         true
       ],
-      "title": "lface LoRA (bbox 0)"
+      "title": "lface LoRA (bbox 1)"
     },
     {
       "id": 3,
@@ -324,7 +324,7 @@
         "euler",
         "simple",
         1,
-        "auto",
+        "branch_lora_composite",
         "attn_out_mlp",
         0,
         0,
@@ -333,7 +333,7 @@
         true,
         true
       ],
-      "title": "Regional sampler (auto fallback)"
+      "title": "Regional sampler (branch LoRA composite - diagnostic)"
     },
     {
       "id": 6,
@@ -422,16 +422,12 @@
         {
           "name": "prompt",
           "type": "STRING",
-          "links": [
-            8
-          ]
+          "links": null
         },
         {
           "name": "preview",
           "type": "IMAGE",
-          "links": [
-            15
-          ]
+          "links": null
         },
         {
           "name": "bboxes",
@@ -506,7 +502,7 @@
           "min": false
         }
       },
-      "title": "KJ bbox prompt builder"
+      "title": "KJ bbox builder - bbox data only"
     },
     {
       "id": 8,
@@ -660,15 +656,15 @@
       },
       "widgets_values": [
         "sface_merge.safetensors",
-        1,
-        1,
-        0.1,
-        0.95,
+        1.5,
+        1.25,
+        0.0,
+        1.0,
         true,
-        true,
+        false,
         true
       ],
-      "title": "sface LoRA (bbox 1)"
+      "title": "sface LoRA (bbox 2)"
     },
     {
       "id": 12,
@@ -696,7 +692,7 @@
           "widget": {
             "name": "text"
           },
-          "link": 8
+          "link": null
         }
       ],
       "outputs": [
@@ -714,9 +710,9 @@
         "Node name for S&R": "CLIPTextEncode"
       },
       "widgets_values": [
-        "lface woman in the left bbox, sface man in the right bbox, two separate people, full body, neutral indoor studio, natural light, distinct non-blended faces"
+        "lface woman standing on the left side of the image, sface man standing on the right side of the image, two separate people, full body, neutral indoor studio, natural light, distinct non-blended faces, no text, no annotations"
       ],
-      "title": "Base Positive Prompt"
+      "title": "Clean Base Positive Prompt - no KJ prompt link"
     },
     {
       "id": 13,
@@ -754,9 +750,9 @@
         "Node name for S&R": "CLIPTextEncode"
       },
       "widgets_values": [
-        "blended faces, merged identities, same face on both people, duplicate person, extra limbs, deformed face, low quality, blurry"
+        "bounding boxes, white rectangles, coordinate labels, text overlay, annotations, labeled diagram, blended faces, merged identities, same face on both people, duplicate person, extra limbs, deformed face, low quality, blurry"
       ],
-      "title": "Shared Negative Prompt"
+      "title": "Negative Prompt - suppress bbox overlays"
     },
     {
       "id": 14,
@@ -776,7 +772,7 @@
         {
           "name": "images",
           "type": "IMAGE",
-          "link": 15
+          "link": null
         }
       ],
       "outputs": [
@@ -789,7 +785,8 @@
       "properties": {
         "Node name for S&R": "PreviewImage"
       },
-      "widgets_values": []
+      "widgets_values": [],
+      "title": "KJ bbox preview - disconnected"
     },
     {
       "id": 16,
@@ -977,14 +974,6 @@
       "K2REGIONAL_LORA"
     ],
     [
-      8,
-      7,
-      0,
-      12,
-      1,
-      "STRING"
-    ],
-    [
       9,
       9,
       0,
@@ -1031,14 +1020,6 @@
       13,
       0,
       "CLIP"
-    ],
-    [
-      15,
-      7,
-      1,
-      14,
-      0,
-      "IMAGE"
     ],
     [
       16,

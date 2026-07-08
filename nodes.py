@@ -201,7 +201,7 @@ class K2RegionalAttentionLoRASampler:
                 "sampler_name": (_sampler_names(),),
                 "scheduler": (_scheduler_names(),),
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "execution_mode": (["auto", "strict_adapter", "layer_injection"], {"default": "auto"}),
+                "execution_mode": (["auto", "strict_adapter", "layer_injection", "branch_lora_composite"], {"default": "auto"}),
                 "layer_injection_targets": (["attn_out_mlp", "attention_only", "all_matched_linears"], {"default": "attn_out_mlp"}),
                 "layer_outside_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "layer_text_token_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.01}),
@@ -266,6 +266,23 @@ class K2RegionalAttentionLoRASampler:
                 steps,
                 cfg,
                 pin_outside_regions,
+            )
+
+        if execution_mode == "branch_lora_composite":
+            return _run_branch_lora_composite_fallback(
+                model,
+                base,
+                positive,
+                negative,
+                latent_image,
+                regional_lora_stack,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                denoise,
+                debug_return_base_latent,
             )
 
         return _run_layer_injection_fallback(
@@ -471,6 +488,101 @@ def _pin_latent_to_base_outside(samples, base_samples, stack):
     base = base_samples["samples"].to(device=regional.device, dtype=regional.dtype)
     out["samples"] = mask * regional + (1.0 - mask) * base
     return out
+
+
+def _run_branch_lora_composite_fallback(
+    model,
+    base,
+    positive,
+    negative,
+    latent_image,
+    stack,
+    seed,
+    steps,
+    cfg,
+    sampler_name,
+    scheduler,
+    denoise,
+    debug_return_base_latent,
+):
+    base_latent = base["samples"]
+    active = stack.enabled_regions
+    if not active:
+        return (base, base.copy() if debug_return_base_latent else base, _stack_union_mask(stack, latent_image["samples"]), "No enabled regional LoRAs.")
+
+    debug_lines = [
+        "Used branch_lora_composite fallback: each regional LoRA is loaded through Comfy's normal LoRA path, "
+        "sampled as a separate branch, then only that branch's masked latent delta is composited back into the base latent.",
+        f"branch_count={len(active)} overlap_mode={stack.overlap_mode}",
+    ]
+    branch_deltas: list[tuple[K2RegionalLora, torch.Tensor, torch.Tensor]] = []
+    for index, regional in enumerate(active, start=1):
+        branch_model = make_lora_branch_model(
+            model,
+            regional.lora_name,
+            strength_model=regional.lora_strength,
+            attention_only_filter=regional.attention_only_filter,
+            ignore_text_encoder_lora=regional.ignore_text_encoder_lora,
+        )
+        branch = _run_comfy_base_sampler(
+            branch_model,
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            regional.positive if regional.positive is not None else positive,
+            regional.negative if regional.negative is not None else negative,
+            latent_image,
+            denoise,
+        )
+        branch_latent = branch["samples"].to(device=base_latent.device, dtype=base_latent.dtype)
+        mask = regional.region.mask_for(base_latent).to(device=base_latent.device, dtype=base_latent.dtype)
+        delta = (branch_latent - base_latent) * float(regional.delta_strength)
+        branch_deltas.append((regional, mask, delta))
+        debug_lines.append(
+            f"[{index}] {regional.lora_name}: lora_strength={regional.lora_strength:.3f} "
+            f"delta_strength={regional.delta_strength:.3f} mask_sum={float(mask.sum().detach().cpu()):.3f}"
+        )
+
+    out_latent = _compose_branch_deltas(base_latent, branch_deltas, stack.overlap_mode)
+    out = base.copy()
+    out["samples"] = out_latent
+    debug = "\n".join(debug_lines)
+    print(f"[K2 Regional LoRA]\n{debug}")
+    return (
+        out,
+        base.copy() if debug_return_base_latent else base,
+        _stack_union_mask(stack, latent_image["samples"]),
+        debug,
+    )
+
+
+def _compose_branch_deltas(base: torch.Tensor, branch_deltas, overlap_mode: str) -> torch.Tensor:
+    if not branch_deltas:
+        return base
+    if overlap_mode == "normalize":
+        total_delta = torch.zeros_like(base)
+        total_mask = torch.zeros_like(base[:, :1])
+        for _regional, mask, delta in branch_deltas:
+            total_delta = total_delta + mask * delta
+            total_mask = total_mask + mask
+        return base + total_delta / total_mask.clamp_min(1.0e-6)
+    if overlap_mode == "add_clamped":
+        total_delta = torch.zeros_like(base)
+        for _regional, mask, delta in branch_deltas:
+            total_delta = total_delta + mask * delta
+        return base + total_delta
+    if overlap_mode in ("priority_1", "priority_3"):
+        ordered = branch_deltas if overlap_mode == "priority_1" else list(reversed(branch_deltas))
+        out = base.clone()
+        claimed = torch.zeros_like(base[:, :1])
+        for _regional, mask, delta in ordered:
+            usable = (mask * (1.0 - claimed)).clamp(0.0, 1.0)
+            out = out + usable * delta
+            claimed = torch.maximum(claimed, mask)
+        return out
+    raise ValueError(f"Unsupported overlap_mode {overlap_mode}")
 
 
 def _run_layer_injection_fallback(
