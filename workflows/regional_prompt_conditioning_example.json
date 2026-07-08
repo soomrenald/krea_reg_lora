@@ -1,0 +1,25 @@
+{
+  "description": "Krea regional LoRA plus regional prompt conditioning wiring example. Use this as a node-chain reference, not a complete checkpoint-specific workflow.",
+  "global_prompt": "cinematic two-person portrait, indoor studio, balanced composition, soft background, detailed lighting",
+  "regions": [
+    {
+      "region": "KreaBBoxToRegionalTokens bbox_index=1",
+      "regional_prompt": "woman, left face description, detailed eyes, natural skin texture",
+      "regional_lora": "KreaRegionalLoRA using the same KREA_REGION output as regional_prompt"
+    },
+    {
+      "region": "KreaBBoxToRegionalTokens bbox_index=2",
+      "regional_prompt": "man, smaller right face description, detailed eyes, natural skin texture",
+      "regional_lora": "KreaRegionalLoRA using the same KREA_REGION output as regional_prompt"
+    }
+  ],
+  "model_patch_order": [
+    "KreaRegionalConditioningApply",
+    "KreaRegionalLoRAApply",
+    "KSampler"
+  ],
+  "debug_nodes": [
+    "KreaRegionalConditioningDebug",
+    "KreaRegionalPromptLoRAMatchDebug"
+  ]
+}

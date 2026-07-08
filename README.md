@@ -7,6 +7,11 @@ The main node applies LoRA deltas only to selected image-token regions, tracks w
 ## Nodes
 
 - `Krea BBox To Regional Tokens`
+- `Krea Regional Prompt`
+- `Krea Regional Conditioning Stack`
+- `Krea Regional Conditioning Apply`
+- `Krea Regional Conditioning Debug`
+- `Krea Regional Prompt LoRA Match Debug`
 - `Krea Regional LoRA`
 - `Krea Regional LoRA Stack`
 - `Krea Regional LoRA Apply`
@@ -27,10 +32,19 @@ Connect that `bboxes` output to `Krea BBox To Regional Tokens` input `bboxes`.
 ## Workflow
 
 1. Draw regions in `Ideogram 4 Prompt Builder KJ`.
-2. Connect its `bboxes`, `width`, and `height` to `Krea BBox To Regional Tokens`.
-3. Create one `Krea Regional LoRA` per region.
-4. Combine them with `Krea Regional LoRA Stack`.
-5. Run `Krea Regional LoRA Apply` on the model before your normal KSampler.
+2. Connect its `bboxes`, `width`, and `height` to one `Krea BBox To Regional Tokens` node per region.
+3. Use the global prompt only for scene, composition, lighting, and background. Do not put region subjects in the global prompt.
+4. Feed each `KREA_REGION` to both matching nodes: `Krea Regional Prompt` and `Krea Regional LoRA`.
+5. Combine regional prompts with `Krea Regional Conditioning Stack`, using the normal global `CLIPTextEncode` output as `global_conditioning`.
+6. Combine regional LoRAs with `Krea Regional LoRA Stack`.
+7. Patch the model with `Krea Regional Conditioning Apply`, then `Krea Regional LoRA Apply`, before the KSampler.
+8. Connect `Krea Regional Conditioning Debug` to preview the actual soft region masks, and `Krea Regional Prompt LoRA Match Debug` to verify that prompt and LoRA entries share the same `region_id`.
+
+Example prompt split:
+
+- Global prompt: `cinematic two-person portrait, indoor studio, balanced composition, soft background, detailed lighting`
+- Region 1 prompt: `woman, left face, detailed eyes, natural skin texture, matching pose`
+- Region 2 prompt: `man, smaller right face, detailed eyes, natural skin texture, matching pose`
 
 ## Important Controls
 
@@ -44,6 +58,8 @@ Connect that `bboxes` output to `Krea BBox To Regional Tokens` input `bboxes`.
 ## Implementation Notes
 
 The package uses ComfyUI model patcher wrappers and `transformer_options["optimized_attention_override"]`, which are present in current ComfyUI. It does not require running a custom sampler.
+
+Regional prompts are applied with a sampler CFG patch. The normal global conditioning remains active everywhere. Each regional prompt is evaluated separately, its denoised effect is multiplied by the shared soft region mask, and that masked effect is added back to the global result.
 
 The model patch is conservative:
 

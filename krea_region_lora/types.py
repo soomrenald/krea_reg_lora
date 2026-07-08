@@ -20,8 +20,11 @@ RetentionMode = Literal["sticky", "decay", "instant"]
 
 @dataclass(frozen=True)
 class KreaRegion:
+    region_id: str
     pixel_bbox: tuple[int, int, int, int]
+    normalized_bbox: tuple[float, float, float, float]
     image_size: tuple[int, int]
+    feather_px: int
     pixel_mask: torch.Tensor
     latent_mask: torch.Tensor
     token_mask: torch.Tensor
@@ -86,6 +89,22 @@ class KreaRegionalLoraStack:
     @property
     def enabled_regions(self) -> tuple[KreaRegionalLora, ...]:
         return tuple(r for r in self.regions if r.enabled and r.lora_name not in ("", "None"))
+
+
+@dataclass(frozen=True)
+class KreaRegionalConditioning:
+    region: KreaRegion
+    conditioning: Any
+    text: str
+    strength: float = 1.0
+    outside_strength: float = 0.0
+    feather_px: int | None = None
+
+
+@dataclass(frozen=True)
+class KreaRegionalConditioningStack:
+    global_conditioning: Any
+    regions: tuple[KreaRegionalConditioning, ...]
 
 
 def parse_measurement_sources(value: str | tuple[str, ...] | list[str]) -> tuple[MeasurementSource, ...]:

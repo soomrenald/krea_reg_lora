@@ -87,8 +87,11 @@ def region_from_bbox(
     latent_mask = pixel_to_latent_mask(pixel_mask)
     token_mask = pixel_to_token_mask(pixel_mask)
     return KreaRegion(
+        region_id=f"bbox_{int(bbox_index)}_{pixel_bbox[0]}_{pixel_bbox[1]}_{pixel_bbox[2]}_{pixel_bbox[3]}",
         pixel_bbox=pixel_bbox,
+        normalized_bbox=_normalized_bbox(pixel_bbox, int(width), int(height)),
         image_size=(int(width), int(height)),
+        feather_px=int(feather_px),
         pixel_mask=pixel_mask,
         latent_mask=latent_mask,
         token_mask=token_mask,
@@ -143,6 +146,13 @@ def normalize_bbox(
     if ix1 <= ix0 or iy1 <= iy0:
         return (0, 0, 0, 0)
     return (ix0, iy0, ix1, iy1)
+
+
+def _normalized_bbox(pixel_bbox: tuple[int, int, int, int], width: int, height: int) -> tuple[float, float, float, float]:
+    x0, y0, x1, y1 = pixel_bbox
+    if width <= 0 or height <= 0:
+        return (0.0, 0.0, 0.0, 0.0)
+    return (float(x0) / float(width), float(y0) / float(height), float(x1) / float(width), float(y1) / float(height))
 
 
 def make_pixel_mask(pixel_bbox: tuple[int, int, int, int], *, width: int, height: int, feather_px: int, batch_size: int) -> torch.Tensor:

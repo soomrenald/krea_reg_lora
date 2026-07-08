@@ -3,10 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 try:
+    from .krea_region_lora.conditioning import build_conditioning_stack, build_regional_conditioning_model, conditioning_debug_preview, encode_regional_conditioning, region_ids_match_lora
     from .krea_region_lora.layer_injection import build_layer_injection_model
     from .krea_region_lora.masks import debug_bbox_image, infer_image_size, region_from_bbox
     from .krea_region_lora.types import MEASUREMENT_SOURCE_OPTIONS, KreaRegionalLora, KreaRegionalLoraStack, parse_measurement_sources
 except ImportError:
+    from krea_region_lora.conditioning import build_conditioning_stack, build_regional_conditioning_model, conditioning_debug_preview, encode_regional_conditioning, region_ids_match_lora
     from krea_region_lora.layer_injection import build_layer_injection_model
     from krea_region_lora.masks import debug_bbox_image, infer_image_size, region_from_bbox
     from krea_region_lora.types import MEASUREMENT_SOURCE_OPTIONS, KreaRegionalLora, KreaRegionalLoraStack, parse_measurement_sources
@@ -79,10 +81,127 @@ class KreaBBoxToRegionalTokens:
             batch_size=batch,
         )
         debug = (
-            f"bbox={region.pixel_bbox} image_size={region.image_size} "
-            f"bbox_count={region.metadata.get('bbox_count', 0)} token_count={region.token_mask.shape[1]}"
+            f"region_id={region.region_id} bbox={region.pixel_bbox} normalized_bbox={region.normalized_bbox} "
+            f"image_size={region.image_size} feather_px={region.feather_px} "
+            f"bbox_count={region.metadata.get('bbox_count', 0)} token_count={region.token_mask.shape[1]} "
+            f"mask_min={float(region.pixel_mask.min()):.4f} mask_max={float(region.pixel_mask.max()):.4f} "
+            f"mask_mean={float(region.pixel_mask.mean()):.4f}"
         )
         return (region.pixel_mask, region, debug_bbox_image(region), debug)
+
+
+class KreaRegionalPrompt:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "region": ("KREA_REGION",),
+                "clip": ("CLIP",),
+                "text": ("STRING", {"multiline": True, "dynamicPrompts": True}),
+                "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "outside_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "feather": ("INT", {"default": -1, "min": -1, "max": 2048, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("KREA_REGIONAL_CONDITIONING",)
+    RETURN_NAMES = ("regional_conditioning",)
+    FUNCTION = "encode"
+    CATEGORY = "Krea/Regional LoRA"
+
+    def encode(self, region, clip, text, strength=1.0, outside_strength=0.0, feather=-1):
+        return (encode_regional_conditioning(clip, region, text, float(strength), float(outside_strength), int(feather)),)
+
+
+class KreaRegionalConditioningStack:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "global_conditioning": ("CONDITIONING",),
+            },
+            "optional": {
+                "regional_conditioning_1": ("KREA_REGIONAL_CONDITIONING",),
+                "regional_conditioning_2": ("KREA_REGIONAL_CONDITIONING",),
+                "regional_conditioning_3": ("KREA_REGIONAL_CONDITIONING",),
+                "regional_conditioning_4": ("KREA_REGIONAL_CONDITIONING",),
+                "regional_conditioning_5": ("KREA_REGIONAL_CONDITIONING",),
+                "regional_conditioning_6": ("KREA_REGIONAL_CONDITIONING",),
+            },
+        }
+
+    RETURN_TYPES = ("KREA_REGIONAL_CONDITIONING_STACK",)
+    RETURN_NAMES = ("regional_conditioning_stack",)
+    FUNCTION = "stack"
+    CATEGORY = "Krea/Regional LoRA"
+
+    def stack(self, global_conditioning, **kwargs):
+        regions = []
+        for key in (
+            "regional_conditioning_1",
+            "regional_conditioning_2",
+            "regional_conditioning_3",
+            "regional_conditioning_4",
+            "regional_conditioning_5",
+            "regional_conditioning_6",
+        ):
+            value = kwargs.get(key)
+            if value is not None:
+                regions.append(value)
+        return (build_conditioning_stack(global_conditioning, regions),)
+
+
+class KreaRegionalConditioningApply:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "regional_conditioning_stack": ("KREA_REGIONAL_CONDITIONING_STACK",),
+                "debug_logging": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL", "STRING")
+    RETURN_NAMES = ("model", "report")
+    FUNCTION = "apply"
+    CATEGORY = "Krea/Regional LoRA"
+
+    def apply(self, model, regional_conditioning_stack, debug_logging=False):
+        return build_regional_conditioning_model(model, regional_conditioning_stack, debug=bool(debug_logging))
+
+
+class KreaRegionalConditioningDebug:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"regional_conditioning_stack": ("KREA_REGIONAL_CONDITIONING_STACK",)}}
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("mask_preview", "report")
+    FUNCTION = "debug"
+    CATEGORY = "Krea/Regional LoRA"
+
+    def debug(self, regional_conditioning_stack):
+        return conditioning_debug_preview(regional_conditioning_stack)
+
+
+class KreaRegionalPromptLoRAMatchDebug:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "regional_conditioning_stack": ("KREA_REGIONAL_CONDITIONING_STACK",),
+                "regional_lora_stack": ("KREA_REGIONAL_LORA_STACK",),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("report",)
+    FUNCTION = "debug"
+    CATEGORY = "Krea/Regional LoRA"
+
+    def debug(self, regional_conditioning_stack, regional_lora_stack):
+        return (region_ids_match_lora(regional_conditioning_stack, regional_lora_stack),)
 
 
 class KreaRegionalLoRA:
@@ -238,7 +357,7 @@ class KreaRegionalLoRADebug:
         ]
         for i, regional in enumerate(regional_lora_stack.regions, start=1):
             lines.append(
-                f"[{i}] lora={regional.lora_name} bbox={regional.region.pixel_bbox} "
+                f"[{i}] lora={regional.lora_name} region_id={regional.region.region_id} bbox={regional.region.pixel_bbox} "
                 f"sources={','.join(regional.measurement_sources)} threshold={regional.threshold}"
             )
         return ("\n".join(lines),)

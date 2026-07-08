@@ -1,5 +1,10 @@
 from .nodes import (
     KreaBBoxToRegionalTokens,
+    KreaRegionalConditioningApply,
+    KreaRegionalConditioningDebug,
+    KreaRegionalConditioningStack,
+    KreaRegionalPrompt,
+    KreaRegionalPromptLoRAMatchDebug,
     KreaRegionalLoRA,
     KreaRegionalLoRAApply,
     KreaRegionalLoRADebug,
@@ -9,6 +14,11 @@ from .nodes import (
 
 NODE_CLASS_MAPPINGS = {
     "KreaBBoxToRegionalTokens": KreaBBoxToRegionalTokens,
+    "KreaRegionalPrompt": KreaRegionalPrompt,
+    "KreaRegionalConditioningStack": KreaRegionalConditioningStack,
+    "KreaRegionalConditioningApply": KreaRegionalConditioningApply,
+    "KreaRegionalConditioningDebug": KreaRegionalConditioningDebug,
+    "KreaRegionalPromptLoRAMatchDebug": KreaRegionalPromptLoRAMatchDebug,
     "KreaRegionalLoRA": KreaRegionalLoRA,
     "KreaRegionalLoRAStack": KreaRegionalLoRAStack,
     "KreaRegionalLoRAApply": KreaRegionalLoRAApply,
@@ -17,6 +27,11 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "KreaBBoxToRegionalTokens": "Krea BBox To Regional Tokens",
+    "KreaRegionalPrompt": "Krea Regional Prompt",
+    "KreaRegionalConditioningStack": "Krea Regional Conditioning Stack",
+    "KreaRegionalConditioningApply": "Krea Regional Conditioning Apply",
+    "KreaRegionalConditioningDebug": "Krea Regional Conditioning Debug",
+    "KreaRegionalPromptLoRAMatchDebug": "Krea Regional Prompt LoRA Match Debug",
     "KreaRegionalLoRA": "Krea Regional LoRA",
     "KreaRegionalLoRAStack": "Krea Regional LoRA Stack",
     "KreaRegionalLoRAApply": "Krea Regional LoRA Apply",

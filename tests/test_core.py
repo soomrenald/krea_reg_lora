@@ -4,6 +4,7 @@ import torch
 
 from torch import nn
 
+from krea_region_lora.conditioning import build_conditioning_stack, conditioning_debug_preview, region_ids_match_lora
 from krea_region_lora.layer_injection import _eligible_linears, sequence_mask_for_region
 from krea_region_lora.masks import coerce_bbox_list, region_from_bbox
 from krea_region_lora.tracking import RegionalRuntimeState
@@ -161,3 +162,40 @@ def test_cross_lora_penalty_is_separate_from_background_penalty():
     j = int(torch.nonzero(state.flags[id(l2)][0])[0])
     assert bias[0, i, j] == -3.0
     assert bias[0, j, i] == -3.0
+
+
+
+def test_region_carries_canonical_identity_and_normalized_bbox():
+    region = make_region((16, 16, 16, 16), width=64, height=64)
+    assert region.region_id == "bbox_0_16_16_32_32"
+    assert region.pixel_bbox == (16, 16, 32, 32)
+    assert region.normalized_bbox == (0.25, 0.25, 0.5, 0.5)
+    assert region.feather_px == 0
+
+
+def test_regional_conditioning_stack_preserves_order_and_region_ids():
+    r1 = make_region((0, 0, 16, 16))
+    r2 = make_region((32, 32, 16, 16))
+    c1 = type("Regional", (), {"region": r1, "conditioning": [], "text": "woman", "strength": 1.0, "outside_strength": 0.0, "feather_px": None})()
+    c2 = type("Regional", (), {"region": r2, "conditioning": [], "text": "man", "strength": 1.0, "outside_strength": 0.0, "feather_px": None})()
+    stack = build_conditioning_stack([[torch.zeros((1, 1, 4)), {}]], [c1, c2])
+    assert [r.region.region_id for r in stack.regions] == [r1.region_id, r2.region_id]
+
+
+def test_conditioning_debug_preview_uses_region_masks():
+    r1 = make_region((0, 0, 16, 16))
+    c1 = type("Regional", (), {"region": r1, "conditioning": [], "text": "woman", "strength": 1.0, "outside_strength": 0.0, "feather_px": None})()
+    stack = build_conditioning_stack([], [c1])
+    image, report = conditioning_debug_preview(stack)
+    assert image.shape == (1, 64, 64, 3)
+    assert float(image.max()) == 1.0
+    assert r1.region_id in report
+
+
+def test_prompt_lora_match_report_uses_shared_region_id():
+    region = make_region()
+    c1 = type("Regional", (), {"region": region, "conditioning": [], "text": "woman", "strength": 1.0, "outside_strength": 0.0, "feather_px": None})()
+    conditioning_stack = build_conditioning_stack([], [c1])
+    lora_stack = KreaRegionalLoraStack((make_lora(region, "same"),))
+    report = region_ids_match_lora(conditioning_stack, lora_stack)
+    assert f"region_id={region.region_id} shared_with_lora=True" in report
