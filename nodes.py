@@ -417,6 +417,12 @@ def _stack_union_mask(stack: K2RegionalLoraStack, target: torch.Tensor) -> torch
 
 def _stack_latent_union_mask(stack: K2RegionalLoraStack, target: torch.Tensor) -> torch.Tensor:
     if not stack.enabled_regions:
+        if target.ndim == 5:
+            return torch.zeros(
+                (target.shape[0], 1, target.shape[2], target.shape[-2], target.shape[-1]),
+                dtype=target.dtype,
+                device=target.device,
+            )
         return torch.zeros((target.shape[0], 1, target.shape[-2], target.shape[-1]), dtype=target.dtype, device=target.device)
     union = None
     for regional in stack.enabled_regions:

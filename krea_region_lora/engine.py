@@ -131,8 +131,13 @@ def resolve_overlaps(
 
 def _union_mask_for(regions: Sequence[K2RegionalLora], target: torch.Tensor) -> torch.Tensor:
     if not regions:
+        if target.ndim == 5:
+            return torch.zeros((target.shape[0], 1, target.shape[2], *target.shape[-2:]), device=target.device, dtype=target.dtype)
         return torch.zeros((target.shape[0], 1, *target.shape[-2:]), device=target.device, dtype=target.dtype)
-    union = torch.zeros((target.shape[0], 1, *target.shape[-2:]), device=target.device, dtype=target.dtype)
+    if target.ndim == 5:
+        union = torch.zeros((target.shape[0], 1, target.shape[2], *target.shape[-2:]), device=target.device, dtype=target.dtype)
+    else:
+        union = torch.zeros((target.shape[0], 1, *target.shape[-2:]), device=target.device, dtype=target.dtype)
     for regional in regions:
         union = torch.maximum(union, regional.region.mask_for(target).to(device=target.device, dtype=target.dtype))
     return union.clamp(0.0, 1.0)

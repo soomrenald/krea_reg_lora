@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import torch
+import torch.nn.functional as F
 
 
 BBoxFormat = Literal["xywh", "xyxy"]
@@ -25,24 +26,26 @@ class K2Region:
 
     def mask_for(self, target: torch.Tensor | tuple[int, ...]) -> torch.Tensor:
         shape = tuple(target.shape) if isinstance(target, torch.Tensor) else tuple(target)
+        device = target.device if isinstance(target, torch.Tensor) else self.latent_mask.device
+        dtype = target.dtype if isinstance(target, torch.Tensor) else self.latent_mask.dtype
+        if len(shape) == 5:
+            mask = self.latent_mask
+            mask = _fit_mask_batch(mask, shape[0])
+            mask = _fit_mask_spatial(mask, shape[-2], shape[-1])
+            mask = mask.unsqueeze(2)
+            if shape[2] > 1:
+                mask = mask.repeat(1, 1, shape[2], 1, 1)
+            return mask.to(device=device, dtype=dtype)
         if len(shape) == 4:
             mask = self.latent_mask
-            return _fit_mask_batch(mask, shape[0]).to(
-                device=target.device if isinstance(target, torch.Tensor) else mask.device,
-                dtype=target.dtype if isinstance(target, torch.Tensor) else mask.dtype,
-            )
+            mask = _fit_mask_batch(mask, shape[0])
+            return _fit_mask_spatial(mask, shape[-2], shape[-1]).to(device=device, dtype=dtype)
         if len(shape) == 3:
             mask = self.token_mask
-            return _fit_mask_batch(mask, shape[0]).to(
-                device=target.device if isinstance(target, torch.Tensor) else mask.device,
-                dtype=target.dtype if isinstance(target, torch.Tensor) else mask.dtype,
-            )
+            return _fit_mask_batch(mask, shape[0]).to(device=device, dtype=dtype)
         if len(shape) == 2:
             mask = self.pixel_mask
-            return _fit_mask_batch(mask, shape[0]).to(
-                device=target.device if isinstance(target, torch.Tensor) else mask.device,
-                dtype=target.dtype if isinstance(target, torch.Tensor) else mask.dtype,
-            )
+            return _fit_mask_batch(mask, shape[0]).to(device=device, dtype=dtype)
         raise ValueError(f"Cannot build a region mask for shape {shape}")
 
 
@@ -83,3 +86,9 @@ def _fit_mask_batch(mask: torch.Tensor, batch: int) -> torch.Tensor:
     if batch == 1:
         return mask[:1]
     raise ValueError(f"Mask batch {mask.shape[0]} does not match target batch {batch}")
+
+
+def _fit_mask_spatial(mask: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    if tuple(mask.shape[-2:]) == (int(height), int(width)):
+        return mask
+    return F.interpolate(mask, size=(int(height), int(width)), mode="area").clamp(0.0, 1.0)

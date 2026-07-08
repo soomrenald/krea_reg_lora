@@ -23,6 +23,8 @@ The implemented core uses regional prediction-delta blending:
 
 KJNodes bboxes default to `xywh`: `(x_min, y_min, width, height)`. The mask node also supports `xyxy`.
 
+KJ displays boxes as `1`, `2`, `3`, etc. The mask node follows that numbering for `bbox_index`; `0` is also accepted as an alias for the first box for older workflows.
+
 Krea 2 token snapping defaults to 16 output pixels, matching VAE compression 8 and DiT patch size 2.
 
 ## Sampling Modes

@@ -46,6 +46,14 @@ def coerce_bbox_list(bboxes: Any, bbox_index: int = 0) -> list[tuple[float, floa
     return []
 
 
+def _resolve_bbox_index(bbox_index: int, bbox_count: int) -> int:
+    if bbox_count <= 0:
+        return 0
+    if bbox_index <= 0:
+        return 0
+    return max(0, min(bbox_index - 1, bbox_count - 1))
+
+
 def region_from_bbox(
     bboxes: Any,
     *,
@@ -63,7 +71,7 @@ def region_from_bbox(
     if not bbox_list:
         pixel_bbox = (0, 0, 0, 0)
     else:
-        index = max(0, min(int(bbox_index), len(bbox_list) - 1))
+        index = _resolve_bbox_index(int(bbox_index), len(bbox_list))
         pixel_bbox = normalize_bbox(
             bbox_list[index],
             width=width,

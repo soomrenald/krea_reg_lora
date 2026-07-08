@@ -69,6 +69,24 @@ def test_xyxy_to_mask_conversion():
     assert torch.all(region.latent_mask[:, :, 2:4, 2:4] == 1)
 
 
+def test_kj_bbox_numbering_is_one_based_with_zero_alias():
+    bboxes = [(0, 0, 16, 16), (16, 16, 16, 16)]
+    zero = region_from_bbox(bboxes, width=64, height=64, bbox_index=0, feather_px=0, snap_to_krea_token_grid=False)
+    one = region_from_bbox(bboxes, width=64, height=64, bbox_index=1, feather_px=0, snap_to_krea_token_grid=False)
+    two = region_from_bbox(bboxes, width=64, height=64, bbox_index=2, feather_px=0, snap_to_krea_token_grid=False)
+    assert zero.pixel_bbox == (0, 0, 16, 16)
+    assert one.pixel_bbox == (0, 0, 16, 16)
+    assert two.pixel_bbox == (16, 16, 32, 32)
+
+
+def test_region_mask_supports_krea_5d_latents():
+    region = make_region((16, 16, 16, 16))
+    target = torch.zeros((1, 16, 1, 8, 8), dtype=torch.float32)
+    mask = region.mask_for(target)
+    assert mask.shape == (1, 1, 1, 8, 8)
+    assert torch.all(mask[:, :, :, 2:4, 2:4] == 1)
+
+
 def test_empty_bbox_or_disabled_lora_returns_base_result():
     empty = region_from_bbox([], width=64, height=64, feather_px=0, snap_to_krea_token_grid=False)
     assert torch.count_nonzero(empty.pixel_mask) == 0
