@@ -34,7 +34,7 @@ Connect that `bboxes` output to `Krea BBox To Regional Tokens` input `bboxes`.
 
 ## Important Controls
 
-- `measurement_sources`: comma-separated sources. `direct_delta` is implemented and used by default.
+- `measurement_sources`: delta source selector. `direct_delta` is the default; `hidden_state_delta` measures the regional layer output against its input hidden state.
 - `normalization`: `relative_norm`, `percentile`, `minmax`, or `raw`.
 - `modified_threshold`: token score threshold for marking a token modified by that LoRA.
 - `retention`: `sticky`, `decay`, or `instant`.

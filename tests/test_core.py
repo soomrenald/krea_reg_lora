@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import torch
 
-from krea_region_lora.layer_injection import sequence_mask_for_region
+from torch import nn
+
+from krea_region_lora.layer_injection import _eligible_linears, sequence_mask_for_region
 from krea_region_lora.masks import coerce_bbox_list, region_from_bbox
 from krea_region_lora.tracking import RegionalRuntimeState
-from krea_region_lora.types import KreaRegionalLora, KreaRegionalLoraStack
+from krea_region_lora.types import KreaRegionalLora, KreaRegionalLoraStack, parse_measurement_sources
 
 
 def make_region(bbox=(16, 16, 16, 16), *, width=64, height=64):
@@ -68,6 +70,64 @@ def test_direct_delta_tracking_marks_only_changed_region_tokens():
     flags = state.update_from_delta(regional, delta, reference)
     assert flags.shape == (1, 16)
     assert int(flags.sum()) == int(torch.count_nonzero(region.token_mask))
+
+
+def test_parse_measurement_sources_accepts_hidden_state_delta_aliases():
+    assert parse_measurement_sources("direct_delta, hidden_delta") == ("direct_delta", "hidden_state_delta")
+    assert parse_measurement_sources(["hidden_state"]) == ("hidden_state_delta",)
+
+
+def test_multi_source_tracking_averages_normalized_measurements():
+    region = make_region()
+    regional = make_lora(region, threshold=0.4)
+    state = RegionalRuntimeState(KreaRegionalLoraStack((regional,), attention_isolation_strength=5.0))
+    direct = torch.zeros((1, 20, 4))
+    hidden = torch.zeros((1, 20, 4))
+    reference = torch.ones((1, 20, 4))
+    mask = sequence_mask_for_region(regional, hidden, outside_strength=0.0, text_token_strength=0.0)
+    hidden = hidden + mask * 1.0
+    flags = state.update_from_measurements(regional, [(direct, reference), (hidden, reference)])
+    assert flags.shape == (1, 16)
+    assert int(flags.sum()) == int(torch.count_nonzero(region.token_mask))
+
+
+def test_eligible_linears_skip_krea_text_conditioning_modules():
+    class Dummy(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.txtfusion = nn.Sequential(nn.Linear(4, 4))
+            self.txtmlp = nn.Sequential(nn.Linear(4, 4))
+            self.tmlp = nn.Sequential(nn.Linear(4, 4))
+            self.tproj = nn.Sequential(nn.Linear(4, 4))
+            self.blocks = nn.ModuleList([nn.Module()])
+            self.blocks[0].attn = nn.Module()
+            self.blocks[0].attn.wo = nn.Linear(4, 4)
+            self.blocks[0].mlp = nn.Module()
+            self.blocks[0].mlp.down = nn.Linear(4, 4)
+
+    eligible = _eligible_linears(Dummy(), "attn_out_mlp")
+    assert "blocks.0.attn.wo" in eligible
+    assert "blocks.0.mlp.down" in eligible
+    assert not any(name.startswith(("txtfusion.", "txtmlp.", "tmlp.", "tproj.")) for name in eligible)
+
+
+def test_sequence_mask_ignores_sequence_shorter_than_image_tokens():
+    region = make_region()
+    regional = make_lora(region)
+    x = torch.zeros((1, 12, 8))
+    assert sequence_mask_for_region(regional, x, outside_strength=0.0, text_token_strength=0.0) is None
+
+
+def test_direct_delta_tracking_ignores_sequence_shorter_than_image_tokens():
+    region = make_region()
+    regional = make_lora(region, threshold=0.01)
+    state = RegionalRuntimeState(KreaRegionalLoraStack((regional,), attention_isolation_strength=5.0))
+    delta = torch.ones((1, 12, 4))
+    reference = torch.ones((1, 12, 4))
+    flags = state.update_from_delta(regional, delta, reference)
+    assert flags.shape == (1, 16)
+    assert int(flags.sum()) == 0
+    assert state.flags == {}
 
 
 def test_attention_bias_blocks_unmodified_queries_to_modified_keys():

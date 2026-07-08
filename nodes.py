@@ -5,11 +5,11 @@ from typing import Any
 try:
     from .krea_region_lora.layer_injection import build_layer_injection_model
     from .krea_region_lora.masks import debug_bbox_image, infer_image_size, region_from_bbox
-    from .krea_region_lora.types import KreaRegionalLora, KreaRegionalLoraStack, parse_measurement_sources
+    from .krea_region_lora.types import MEASUREMENT_SOURCE_OPTIONS, KreaRegionalLora, KreaRegionalLoraStack, parse_measurement_sources
 except ImportError:
     from krea_region_lora.layer_injection import build_layer_injection_model
     from krea_region_lora.masks import debug_bbox_image, infer_image_size, region_from_bbox
-    from krea_region_lora.types import KreaRegionalLora, KreaRegionalLoraStack, parse_measurement_sources
+    from krea_region_lora.types import MEASUREMENT_SOURCE_OPTIONS, KreaRegionalLora, KreaRegionalLoraStack, parse_measurement_sources
 
 try:
     import folder_paths  # type: ignore
@@ -98,7 +98,7 @@ class KreaRegionalLoRA:
                 "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "enabled": ("BOOLEAN", {"default": True}),
                 "ignore_text_encoder_lora": ("BOOLEAN", {"default": True}),
-                "measurement_sources": ("STRING", {"default": "direct_delta", "multiline": False}),
+                "measurement_sources": (MEASUREMENT_SOURCE_OPTIONS, {"default": "direct_delta"}),
                 "normalization": (["relative_norm", "percentile", "minmax", "raw"], {"default": "relative_norm"}),
                 "percentile": ("FLOAT", {"default": 95.0, "min": 1.0, "max": 100.0, "step": 1.0}),
                 "modified_threshold": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 100.0, "step": 0.001}),

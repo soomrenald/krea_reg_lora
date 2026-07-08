@@ -11,7 +11,8 @@ BBoxFormat = Literal["xywh", "xyxy"]
 BatchMode = Literal["single", "repeat", "per_batch"]
 CrossLoraMode = Literal["allow", "penalize", "block"]
 LayerTargetPolicy = Literal["attn_out_mlp", "attention_only", "all_matched_linears"]
-MeasurementSource = Literal["direct_delta"]
+MeasurementSource = Literal["direct_delta", "hidden_state_delta"]
+MEASUREMENT_SOURCE_OPTIONS = ["direct_delta", "hidden_state_delta"]
 NormalizationMode = Literal["relative_norm", "minmax", "percentile", "raw"]
 OverlapMode = Literal["normalize", "priority_1", "priority_last", "add"]
 RetentionMode = Literal["sticky", "decay", "instant"]
@@ -96,6 +97,8 @@ def parse_measurement_sources(value: str | tuple[str, ...] | list[str]) -> tuple
     for item in raw:
         if item in ("direct", "direct_delta", "delta"):
             out.append("direct_delta")
+        elif item in ("hidden", "hidden_delta", "hidden_state", "hidden_state_delta", "state_delta"):
+            out.append("hidden_state_delta")
     return tuple(dict.fromkeys(out)) or ("direct_delta",)
 
 

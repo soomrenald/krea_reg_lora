@@ -24,20 +24,35 @@ class RegionalRuntimeState:
         self.updates.clear()
 
     def update_from_delta(self, regional: KreaRegionalLora, delta: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
-        if delta.ndim < 3:
-            raise ValueError(f"Expected sequence delta tensor, got {tuple(delta.shape)}")
-        seq_len = int(delta.shape[-2])
-        batch = int(delta.shape[0])
+        return self.update_from_measurements(regional, [(delta, reference)])
+
+    def update_from_measurements(self, regional: KreaRegionalLora, measurements: list[tuple[torch.Tensor, torch.Tensor]]) -> torch.Tensor:
+        if not measurements:
+            raise ValueError("Expected at least one delta measurement")
+        first_delta = measurements[0][0]
+        if first_delta.ndim < 3:
+            raise ValueError(f"Expected sequence delta tensor, got {tuple(first_delta.shape)}")
+        seq_len = int(first_delta.shape[-2])
+        batch = int(first_delta.shape[0])
         img_len = int(regional.region.token_mask.shape[1])
         if img_len <= 0:
-            return delta.new_zeros((batch, seq_len), dtype=torch.bool)
-        img_start = max(0, seq_len - img_len)
+            return first_delta.new_zeros((batch, seq_len), dtype=torch.bool)
+        if seq_len < img_len:
+            return first_delta.new_zeros((batch, img_len), dtype=torch.bool)
+        img_start = seq_len - img_len
 
-        raw = torch.linalg.vector_norm(delta.float(), dim=-1)
-        ref = torch.linalg.vector_norm(reference.float(), dim=-1).clamp_min(1.0e-6)
-        score = _normalize_score(raw, ref, regional.normalization, regional.percentile)
+        scores = []
+        for delta, reference in measurements:
+            if delta.ndim < 3:
+                raise ValueError(f"Expected sequence delta tensor, got {tuple(delta.shape)}")
+            if tuple(delta.shape[:-1]) != tuple(first_delta.shape[:-1]):
+                raise ValueError(f"Measurement sequence shape {tuple(delta.shape)} does not match {tuple(first_delta.shape)}")
+            raw = torch.linalg.vector_norm(delta.float(), dim=-1)
+            ref = torch.linalg.vector_norm(reference.float(), dim=-1).clamp_min(1.0e-6)
+            scores.append(_normalize_score(raw, ref, regional.normalization, regional.percentile))
+        score = torch.stack(scores, dim=0).mean(dim=0)
         image_score = score[:, img_start:img_start + img_len]
-        image_region = _token_mask_for(regional, batch, delta.device, score.dtype)
+        image_region = _token_mask_for(regional, batch, first_delta.device, score.dtype)
         image_score = image_score * image_region.squeeze(-1)
         new_flags = image_score > float(regional.threshold)
 

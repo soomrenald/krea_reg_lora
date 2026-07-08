@@ -91,9 +91,17 @@ class RegionalLayerInjection:
                 if mask is None:
                     continue
                 delta = raw_delta * mask.to(device=raw_delta.device, dtype=raw_delta.dtype)
+                regional_out = out + delta.to(dtype=out.dtype)
+                measurements = []
                 if "direct_delta" in patch.regional.measurement_sources:
-                    self.state.update_from_delta(patch.regional, delta, out)
-                out = out + delta.to(dtype=out.dtype)
+                    measurements.append((delta, out))
+                if "hidden_state_delta" in patch.regional.measurement_sources:
+                    hidden_reference = x.to(device=regional_out.device, dtype=regional_out.dtype)
+                    hidden_delta = (regional_out - hidden_reference) * mask.to(device=regional_out.device, dtype=regional_out.dtype)
+                    measurements.append((hidden_delta, hidden_reference))
+                if measurements:
+                    self.state.update_from_measurements(patch.regional, measurements)
+                out = regional_out
             return out
 
         return hook
@@ -238,7 +246,7 @@ def sequence_mask_for_region(
         full = torch.full((batch, seq_len, 1), float(text_token_strength), device=x.device, dtype=x.dtype)
         full[:, seq_len - img_len:, :] = token_mask
     else:
-        full = F.interpolate(token_mask.transpose(1, 2), size=seq_len, mode="linear", align_corners=False).transpose(1, 2)
+        return None
     if outside_strength:
         full = full + (1.0 - full) * float(outside_strength)
     while full.ndim < x.ndim:
@@ -267,6 +275,8 @@ def _eligible_linears(model_obj: Any, target_policy: LayerTargetPolicy) -> dict[
         if not torch.is_tensor(weight) or weight.ndim != 2:
             continue
         lname = name.lower()
+        if lname.startswith(("txtfusion.", "txtmlp.", "tmlp.", "tproj.")):
+            continue
         if target_policy == "all_matched_linears":
             out[name] = module
         elif target_policy == "attention_only":
