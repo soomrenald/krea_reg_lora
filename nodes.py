@@ -54,7 +54,6 @@ class K2BBoxToRegionalMask:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "bboxes": ("BBOX",),
                 "width": ("INT", {"default": 1024, "min": 16, "max": 16384, "step": 8}),
                 "height": ("INT", {"default": 1024, "min": 16, "max": 16384, "step": 8}),
                 "bbox_format": (["xywh", "xyxy"], {"default": "xywh"}),
@@ -65,6 +64,8 @@ class K2BBoxToRegionalMask:
                 "batch_mode": (["single", "repeat", "per_batch"], {"default": "repeat"}),
             },
             "optional": {
+                "bboxes": ("BOUNDING_BOX",),
+                "kj_bboxes": ("BBOX",),
                 "latent": ("LATENT",),
             },
         }
@@ -76,7 +77,6 @@ class K2BBoxToRegionalMask:
 
     def build(
         self,
-        bboxes,
         width,
         height,
         bbox_format="xywh",
@@ -85,11 +85,14 @@ class K2BBoxToRegionalMask:
         feather_px=32,
         snap_to_krea_token_grid=True,
         batch_mode="repeat",
+        bboxes=None,
+        kj_bboxes=None,
         latent=None,
     ):
+        bbox_source = bboxes if bboxes is not None else kj_bboxes
         image_w, image_h, batch = infer_image_size(latent, width, height)
         region = region_from_bbox(
-            bboxes,
+            bbox_source,
             width=image_w,
             height=image_h,
             bbox_format=bbox_format,

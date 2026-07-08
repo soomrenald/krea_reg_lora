@@ -21,7 +21,12 @@ def coerce_bbox_list(bboxes: Any, bbox_index: int = 0) -> list[tuple[float, floa
     else:
         data = bboxes
     if isinstance(data, dict):
-        for keys in (("x_min", "y_min", "width", "height"), ("x0", "y0", "x1", "y1")):
+        for keys in (
+            ("x_min", "y_min", "width", "height"),
+            ("x", "y", "width", "height"),
+            ("x", "y", "w", "h"),
+            ("x0", "y0", "x1", "y1"),
+        ):
             if all(k in data for k in keys):
                 return [tuple(float(data[k]) for k in keys)]  # type: ignore[arg-type]
         if "bbox" in data:
@@ -116,6 +121,12 @@ def normalize_bbox(
     snap_to_krea_token_grid: bool,
 ) -> tuple[int, int, int, int]:
     x0, y0, a, b = bbox
+    if all(0.0 <= value <= 1.0 for value in (x0, y0, a, b)):
+        x0 *= float(width)
+        a *= float(width)
+        y0 *= float(height)
+        b *= float(height)
+
     if bbox_format == "xywh":
         x1 = x0 + max(0.0, a)
         y1 = y0 + max(0.0, b)
