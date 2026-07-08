@@ -345,22 +345,55 @@ class K2RegionalDecodeComposite:
     CATEGORY = "Krea 2/Regional LoRA"
 
     def composite(self, vae, regional_samples, base_samples, union_mask, feather_px=32):
-        regional_image = vae.decode(regional_samples["samples"])
-        base_image = vae.decode(base_samples["samples"])
-        mask = union_mask.unsqueeze(-1)
-        if mask.shape[1:3] != regional_image.shape[1:3]:
-            mask = F.interpolate(mask.permute(0, 3, 1, 2), size=regional_image.shape[1:3], mode="bilinear", align_corners=False)
-            mask = mask.permute(0, 2, 3, 1)
+        regional_image, frames_per_batch = _decoded_image_to_bhwc(vae.decode(regional_samples["samples"]))
+        base_image, _base_frames_per_batch = _decoded_image_to_bhwc(vae.decode(base_samples["samples"]))
+        if base_image.shape != regional_image.shape:
+            raise ValueError(
+                f"Regional/base decoded image shapes must match, got {tuple(regional_image.shape)} and {tuple(base_image.shape)}"
+            )
+        mask = _image_mask_for(union_mask, regional_image, frames_per_batch)
         if feather_px > 0:
             mask = F.avg_pool2d(
-                mask.permute(0, 3, 1, 2),
+                mask,
                 kernel_size=2 * int(feather_px) + 1,
                 stride=1,
                 padding=int(feather_px),
                 count_include_pad=False,
-            ).permute(0, 2, 3, 1)
+            )
+        mask = mask.permute(0, 2, 3, 1).clamp(0.0, 1.0)
         image = mask.clamp(0.0, 1.0) * regional_image + (1.0 - mask.clamp(0.0, 1.0)) * base_image
         return (image.clamp(0.0, 1.0),)
+
+
+def _decoded_image_to_bhwc(image: torch.Tensor) -> tuple[torch.Tensor, int]:
+    if image.ndim == 4:
+        return image, 1
+    if image.ndim == 5 and image.shape[-1] in (1, 3, 4):
+        batch, frames, height, width, channels = image.shape
+        return image.reshape(batch * frames, height, width, channels), int(frames)
+    if image.ndim == 3 and image.shape[-1] in (1, 3, 4):
+        return image.unsqueeze(0), 1
+    raise ValueError(f"Decoded image must be BHWC or BTHWC, got shape {tuple(image.shape)}")
+
+
+def _image_mask_for(union_mask: torch.Tensor, image: torch.Tensor, frames_per_batch: int) -> torch.Tensor:
+    mask = union_mask
+    if mask.ndim == 4 and mask.shape[1] == 1:
+        mask = mask[:, 0]
+    if mask.ndim != 3:
+        raise ValueError(f"Union mask must be BHW, got shape {tuple(mask.shape)}")
+    if frames_per_batch > 1:
+        mask = mask.repeat_interleave(int(frames_per_batch), dim=0)
+    elif mask.shape[0] == 1 and image.shape[0] > 1:
+        mask = mask.repeat(int(image.shape[0]), 1, 1)
+    elif mask.shape[0] != image.shape[0] and image.shape[0] % mask.shape[0] == 0:
+        mask = mask.repeat_interleave(int(image.shape[0] // mask.shape[0]), dim=0)
+    if mask.shape[0] != image.shape[0]:
+        raise ValueError(f"Union mask batch {mask.shape[0]} does not match decoded image batch {image.shape[0]}")
+    mask = mask.unsqueeze(1).to(device=image.device, dtype=image.dtype)
+    if mask.shape[-2:] != image.shape[1:3]:
+        mask = F.interpolate(mask, size=image.shape[1:3], mode="bilinear", align_corners=False)
+    return mask
 
 
 def _run_comfy_base_sampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise):
