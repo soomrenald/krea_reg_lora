@@ -2,66 +2,41 @@ from __future__ import annotations
 
 from typing import Any
 
-import torch
-import torch.nn.functional as F
-
 try:
-    from .krea_region_lora.engine import run_regional_velocity_sampler
     from .krea_region_lora.layer_injection import build_layer_injection_model
-    from .krea_region_lora.lora import make_lora_branch_model
     from .krea_region_lora.masks import debug_bbox_image, infer_image_size, region_from_bbox
-    from .krea_region_lora.types import K2RegionalLora, K2RegionalLoraStack
+    from .krea_region_lora.types import KreaRegionalLora, KreaRegionalLoraStack, parse_measurement_sources
 except ImportError:
-    from krea_region_lora.engine import run_regional_velocity_sampler
     from krea_region_lora.layer_injection import build_layer_injection_model
-    from krea_region_lora.lora import make_lora_branch_model
     from krea_region_lora.masks import debug_bbox_image, infer_image_size, region_from_bbox
-    from krea_region_lora.types import K2RegionalLora, K2RegionalLoraStack
+    from krea_region_lora.types import KreaRegionalLora, KreaRegionalLoraStack, parse_measurement_sources
 
 try:
-    import comfy.sample  # type: ignore
-    import comfy.samplers  # type: ignore
-    import comfy.utils  # type: ignore
     import folder_paths  # type: ignore
-    import latent_preview  # type: ignore
-except Exception:  # pragma: no cover - tests run without a full Comfy import path
-    comfy = None  # type: ignore
+except Exception:  # pragma: no cover - local tests run outside ComfyUI
     folder_paths = None  # type: ignore
-    latent_preview = None  # type: ignore
 
 
 def _lora_names() -> list[str]:
     if folder_paths is None:
         return ["None"]
     names = folder_paths.get_filename_list("loras")
-    return names or ["None"]
+    return ["None"] + [n for n in names if n != "None"]
 
 
-def _sampler_names() -> list[str]:
-    if comfy is None:
-        return ["euler"]
-    return comfy.samplers.KSampler.SAMPLERS
-
-
-def _scheduler_names() -> list[str]:
-    if comfy is None:
-        return ["normal"]
-    return comfy.samplers.KSampler.SCHEDULERS
-
-
-class K2BBoxToRegionalMask:
+class KreaBBoxToRegionalTokens:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "width": ("INT", {"default": 1024, "min": 16, "max": 16384, "step": 8}),
                 "height": ("INT", {"default": 1024, "min": 16, "max": 16384, "step": 8}),
-                "bbox_format": (["xywh", "xyxy"], {"default": "xywh"}),
                 "bbox_index": ("INT", {"default": 0, "min": 0, "max": 4096}),
+                "bbox_format": (["xywh", "xyxy"], {"default": "xywh"}),
                 "grow_px": ("INT", {"default": 0, "min": -4096, "max": 4096}),
                 "feather_px": ("INT", {"default": 32, "min": 0, "max": 2048}),
                 "snap_to_krea_token_grid": ("BOOLEAN", {"default": True}),
-                "batch_mode": (["single", "repeat", "per_batch"], {"default": "repeat"}),
+                "batch_mode": (["repeat", "single", "per_batch"], {"default": "repeat"}),
             },
             "optional": {
                 "bboxes": ("BOUNDING_BOX",),
@@ -70,17 +45,17 @@ class K2BBoxToRegionalMask:
             },
         }
 
-    RETURN_TYPES = ("MASK", "K2REGION", "IMAGE")
-    RETURN_NAMES = ("region_mask", "region", "debug_bbox_image")
+    RETURN_TYPES = ("MASK", "KREA_REGION", "IMAGE", "STRING")
+    RETURN_NAMES = ("region_mask", "region", "debug_bbox_image", "debug")
     FUNCTION = "build"
-    CATEGORY = "Krea 2/Regional LoRA"
+    CATEGORY = "Krea/Regional LoRA"
 
     def build(
         self,
         width,
         height,
-        bbox_format="xywh",
         bbox_index=0,
+        bbox_format="xywh",
         grow_px=0,
         feather_px=32,
         snap_to_krea_token_grid=True,
@@ -95,225 +70,135 @@ class K2BBoxToRegionalMask:
             bbox_source,
             width=image_w,
             height=image_h,
-            bbox_format=bbox_format,
             bbox_index=bbox_index,
+            bbox_format=bbox_format,
             grow_px=grow_px,
             feather_px=feather_px,
             snap_to_krea_token_grid=snap_to_krea_token_grid,
             batch_mode=batch_mode,
             batch_size=batch,
         )
-        return (region.pixel_mask, region, debug_bbox_image(region))
+        debug = (
+            f"bbox={region.pixel_bbox} image_size={region.image_size} "
+            f"bbox_count={region.metadata.get('bbox_count', 0)} token_count={region.token_mask.shape[1]}"
+        )
+        return (region.pixel_mask, region, debug_bbox_image(region), debug)
 
 
-class K2RegionalCharacterLoRA:
+class KreaRegionalLoRA:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "region": ("K2REGION",),
-                "positive": ("CONDITIONING",),
-                "negative": ("CONDITIONING",),
+                "region": ("KREA_REGION",),
                 "lora_name": (_lora_names(),),
                 "lora_strength": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
                 "delta_strength": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
-                "start_percent": ("FLOAT", {"default": 0.10, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "end_percent": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "enabled": ("BOOLEAN", {"default": True}),
-                "attention_only_filter": ("BOOLEAN", {"default": True}),
                 "ignore_text_encoder_lora": ("BOOLEAN", {"default": True}),
-            },
+                "measurement_sources": ("STRING", {"default": "direct_delta", "multiline": False}),
+                "normalization": (["relative_norm", "percentile", "minmax", "raw"], {"default": "relative_norm"}),
+                "percentile": ("FLOAT", {"default": 95.0, "min": 1.0, "max": 100.0, "step": 1.0}),
+                "modified_threshold": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 100.0, "step": 0.001}),
+                "retention": (["sticky", "decay", "instant"], {"default": "sticky"}),
+                "decay": ("FLOAT", {"default": 0.96, "min": 0.0, "max": 1.0, "step": 0.01}),
+            }
         }
 
-    RETURN_TYPES = ("K2REGIONAL_LORA",)
+    RETURN_TYPES = ("KREA_REGIONAL_LORA",)
     RETURN_NAMES = ("regional_lora",)
     FUNCTION = "bind"
-    CATEGORY = "Krea 2/Regional LoRA"
+    CATEGORY = "Krea/Regional LoRA"
 
     def bind(
         self,
         region,
-        positive,
-        negative,
         lora_name,
         lora_strength=1.0,
         delta_strength=1.0,
-        start_percent=0.10,
-        end_percent=0.95,
+        start_percent=0.0,
+        end_percent=1.0,
         enabled=True,
-        attention_only_filter=True,
         ignore_text_encoder_lora=True,
+        measurement_sources="direct_delta",
+        normalization="relative_norm",
+        percentile=95.0,
+        modified_threshold=0.05,
+        retention="sticky",
+        decay=0.96,
     ):
         return (
-            K2RegionalLora(
+            KreaRegionalLora(
                 region=region,
-                positive=positive,
-                negative=negative,
                 lora_name=lora_name,
                 lora_strength=float(lora_strength),
                 delta_strength=float(delta_strength),
                 start_percent=float(start_percent),
                 end_percent=float(end_percent),
                 enabled=bool(enabled),
-                attention_only_filter=bool(attention_only_filter),
                 ignore_text_encoder_lora=bool(ignore_text_encoder_lora),
+                measurement_sources=parse_measurement_sources(measurement_sources),
+                normalization=normalization,
+                percentile=float(percentile),
+                threshold=float(modified_threshold),
+                retention=retention,
+                decay=float(decay),
             ),
         )
 
 
-class K2RegionalLoRAStack3:
+class KreaRegionalLoRAStack:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "regional_lora_1": ("K2REGIONAL_LORA",),
-                "overlap_mode": (["normalize", "priority_1", "priority_3", "add_clamped"], {"default": "normalize"}),
+                "regional_lora_1": ("KREA_REGIONAL_LORA",),
+                "overlap_mode": (["normalize", "priority_1", "priority_last", "add"], {"default": "normalize"}),
+                "attention_isolation_strength": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 10000.0, "step": 0.1}),
+                "cross_lora_mode": (["allow", "penalize", "block"], {"default": "penalize"}),
+                "cross_lora_strength": ("FLOAT", {"default": 3.0, "min": 0.0, "max": 10000.0, "step": 0.1}),
             },
             "optional": {
-                "regional_lora_2": ("K2REGIONAL_LORA",),
-                "regional_lora_3": ("K2REGIONAL_LORA",),
+                "regional_lora_2": ("KREA_REGIONAL_LORA",),
+                "regional_lora_3": ("KREA_REGIONAL_LORA",),
+                "regional_lora_4": ("KREA_REGIONAL_LORA",),
+                "regional_lora_5": ("KREA_REGIONAL_LORA",),
+                "regional_lora_6": ("KREA_REGIONAL_LORA",),
             },
         }
 
-    RETURN_TYPES = ("K2REGIONAL_LORA_STACK",)
+    RETURN_TYPES = ("KREA_REGIONAL_LORA_STACK",)
     RETURN_NAMES = ("regional_lora_stack",)
     FUNCTION = "stack"
-    CATEGORY = "Krea 2/Regional LoRA"
+    CATEGORY = "Krea/Regional LoRA"
 
-    def stack(self, regional_lora_1, overlap_mode="normalize", regional_lora_2=None, regional_lora_3=None):
-        regions = tuple(r for r in (regional_lora_1, regional_lora_2, regional_lora_3) if r is not None)
-        return (K2RegionalLoraStack(regions=regions, overlap_mode=overlap_mode),)
-
-
-class K2RegionalAttentionLoRASampler:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model": ("MODEL",),
-                "positive": ("CONDITIONING",),
-                "negative": ("CONDITIONING",),
-                "latent_image": ("LATENT",),
-                "regional_lora_stack": ("K2REGIONAL_LORA_STACK",),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True}),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
-                "cfg": ("FLOAT", {"default": 4.0, "min": 0.0, "max": 100.0, "step": 0.1}),
-                "sampler_name": (_sampler_names(),),
-                "scheduler": (_scheduler_names(),),
-                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "execution_mode": (["auto", "strict_adapter", "layer_injection", "branch_lora_composite"], {"default": "auto"}),
-                "layer_injection_targets": (["attn_out_mlp", "attention_only", "all_matched_linears"], {"default": "attn_out_mlp"}),
-                "layer_outside_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "layer_text_token_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "pin_outside_regions": ("BOOLEAN", {"default": True}),
-                "final_latent_pin": ("BOOLEAN", {"default": True}),
-                "post_decode_safe_mode": ("BOOLEAN", {"default": True}),
-                "debug_return_base_latent": ("BOOLEAN", {"default": True}),
-            },
-        }
-
-    RETURN_TYPES = ("LATENT", "LATENT", "MASK", "STRING")
-    RETURN_NAMES = ("samples", "base_samples", "union_mask", "debug_info")
-    FUNCTION = "sample"
-    CATEGORY = "Krea 2/Regional LoRA"
-
-    def sample(
-        self,
-        model,
-        positive,
-        negative,
-        latent_image,
-        regional_lora_stack,
-        seed,
-        steps,
-        cfg,
-        sampler_name,
-        scheduler,
-        denoise,
-        execution_mode="auto",
-        layer_injection_targets="attn_out_mlp",
-        layer_outside_strength=0.0,
-        layer_text_token_strength=0.0,
-        pin_outside_regions=True,
-        final_latent_pin=True,
-        post_decode_safe_mode=True,
-        debug_return_base_latent=True,
-    ):
-        base = _run_comfy_base_sampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise)
-        active = regional_lora_stack.enabled_regions
-        union_mask = _stack_union_mask(regional_lora_stack, latent_image["samples"])
-        if not active:
-            return (base, base.copy(), union_mask, "No enabled regional LoRAs; returned base sampler output.")
-
-        adapter = getattr(model, "k2_regional_velocity_predictor", None)
-        if adapter is None and execution_mode == "strict_adapter":
-            return (
-                base,
-                base.copy() if debug_return_base_latent else base,
-                union_mask,
-                "Strict adapter mode selected, but this model does not expose k2_regional_velocity_predictor; returned base samples.",
-            )
-
-        if adapter is not None and execution_mode in ("auto", "strict_adapter"):
-            return _run_adapter_regional_sampler(
-                adapter,
-                model,
-                positive,
-                negative,
-                latent_image,
-                regional_lora_stack,
-                seed,
-                steps,
-                cfg,
-                pin_outside_regions,
-            )
-
-        if execution_mode == "branch_lora_composite":
-            return _run_branch_lora_composite_fallback(
-                model,
-                base,
-                positive,
-                negative,
-                latent_image,
-                regional_lora_stack,
-                seed,
-                steps,
-                cfg,
-                sampler_name,
-                scheduler,
-                denoise,
-                debug_return_base_latent,
-            )
-
-        return _run_layer_injection_fallback(
-            model,
-            base,
-            positive,
-            negative,
-            latent_image,
-            regional_lora_stack,
-            seed,
-            steps,
-            cfg,
-            sampler_name,
-            scheduler,
-            denoise,
-            layer_injection_targets,
-            layer_outside_strength,
-            layer_text_token_strength,
-            final_latent_pin,
-            debug_return_base_latent,
+    def stack(self, regional_lora_1, overlap_mode="normalize", attention_isolation_strength=5.0, cross_lora_mode="penalize", cross_lora_strength=3.0, **kwargs):
+        regions = [regional_lora_1]
+        for key in ("regional_lora_2", "regional_lora_3", "regional_lora_4", "regional_lora_5", "regional_lora_6"):
+            value = kwargs.get(key)
+            if value is not None:
+                regions.append(value)
+        return (
+            KreaRegionalLoraStack(
+                regions=tuple(regions),
+                overlap_mode=overlap_mode,
+                attention_isolation_strength=float(attention_isolation_strength),
+                cross_lora_mode=cross_lora_mode,
+                cross_lora_strength=float(cross_lora_strength),
+            ),
         )
 
 
-class K2RegionalLayerLoRAApply:
+class KreaRegionalLoRAApply:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "model": ("MODEL",),
-                "regional_lora_stack": ("K2REGIONAL_LORA_STACK",),
-                "layer_injection_targets": (["attn_out_mlp", "attention_only", "all_matched_linears"], {"default": "attn_out_mlp"}),
+                "regional_lora_stack": ("KREA_REGIONAL_LORA_STACK",),
+                "layer_targets": (["attn_out_mlp", "attention_only", "all_matched_linears"], {"default": "attn_out_mlp"}),
                 "outside_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "text_token_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "debug_logging": ("BOOLEAN", {"default": False}),
@@ -323,349 +208,37 @@ class K2RegionalLayerLoRAApply:
     RETURN_TYPES = ("MODEL", "STRING")
     RETURN_NAMES = ("model", "report")
     FUNCTION = "apply"
-    CATEGORY = "Krea 2/Regional LoRA"
+    CATEGORY = "Krea/Regional LoRA"
 
-    def apply(
-        self,
-        model,
-        regional_lora_stack,
-        layer_injection_targets="attn_out_mlp",
-        outside_strength=0.0,
-        text_token_strength=0.0,
-        debug_logging=False,
-    ):
+    def apply(self, model, regional_lora_stack, layer_targets="attn_out_mlp", outside_strength=0.0, text_token_strength=0.0, debug_logging=False):
         return build_layer_injection_model(
             model,
             regional_lora_stack,
-            target_policy=layer_injection_targets,
-            outside_strength=outside_strength,
-            text_token_strength=text_token_strength,
-            debug=debug_logging,
+            target_policy=layer_targets,
+            outside_strength=float(outside_strength),
+            text_token_strength=float(text_token_strength),
+            debug=bool(debug_logging),
         )
 
 
-class K2RegionalDecodeComposite:
+class KreaRegionalLoRADebug:
     @classmethod
     def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "vae": ("VAE",),
-                "regional_samples": ("LATENT",),
-                "base_samples": ("LATENT",),
-                "union_mask": ("MASK",),
-                "feather_px": ("INT", {"default": 32, "min": 0, "max": 2048}),
-            }
-        }
+        return {"required": {"regional_lora_stack": ("KREA_REGIONAL_LORA_STACK",)}}
 
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "composite"
-    CATEGORY = "Krea 2/Regional LoRA"
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "debug"
+    CATEGORY = "Krea/Regional LoRA"
 
-    def composite(self, vae, regional_samples, base_samples, union_mask, feather_px=32):
-        regional_image, frames_per_batch = _decoded_image_to_bhwc(vae.decode(regional_samples["samples"]))
-        base_image, _base_frames_per_batch = _decoded_image_to_bhwc(vae.decode(base_samples["samples"]))
-        if base_image.shape != regional_image.shape:
-            raise ValueError(
-                f"Regional/base decoded image shapes must match, got {tuple(regional_image.shape)} and {tuple(base_image.shape)}"
+    def debug(self, regional_lora_stack):
+        lines = [
+            f"regions={len(regional_lora_stack.regions)} enabled={len(regional_lora_stack.enabled_regions)}",
+            f"attention_isolation_strength={regional_lora_stack.attention_isolation_strength}",
+            f"cross_lora_mode={regional_lora_stack.cross_lora_mode}",
+        ]
+        for i, regional in enumerate(regional_lora_stack.regions, start=1):
+            lines.append(
+                f"[{i}] lora={regional.lora_name} bbox={regional.region.pixel_bbox} "
+                f"sources={','.join(regional.measurement_sources)} threshold={regional.threshold}"
             )
-        mask = _image_mask_for(union_mask, regional_image, frames_per_batch)
-        if feather_px > 0:
-            mask = F.avg_pool2d(
-                mask,
-                kernel_size=2 * int(feather_px) + 1,
-                stride=1,
-                padding=int(feather_px),
-                count_include_pad=False,
-            )
-        mask = mask.permute(0, 2, 3, 1).clamp(0.0, 1.0)
-        image = mask.clamp(0.0, 1.0) * regional_image + (1.0 - mask.clamp(0.0, 1.0)) * base_image
-        return (image.clamp(0.0, 1.0),)
-
-
-def _decoded_image_to_bhwc(image: torch.Tensor) -> tuple[torch.Tensor, int]:
-    if image.ndim == 4:
-        return image, 1
-    if image.ndim == 5 and image.shape[-1] in (1, 3, 4):
-        batch, frames, height, width, channels = image.shape
-        return image.reshape(batch * frames, height, width, channels), int(frames)
-    if image.ndim == 3 and image.shape[-1] in (1, 3, 4):
-        return image.unsqueeze(0), 1
-    raise ValueError(f"Decoded image must be BHWC or BTHWC, got shape {tuple(image.shape)}")
-
-
-def _image_mask_for(union_mask: torch.Tensor, image: torch.Tensor, frames_per_batch: int) -> torch.Tensor:
-    mask = union_mask
-    if mask.ndim == 4 and mask.shape[1] == 1:
-        mask = mask[:, 0]
-    if mask.ndim != 3:
-        raise ValueError(f"Union mask must be BHW, got shape {tuple(mask.shape)}")
-    if frames_per_batch > 1:
-        mask = mask.repeat_interleave(int(frames_per_batch), dim=0)
-    elif mask.shape[0] == 1 and image.shape[0] > 1:
-        mask = mask.repeat(int(image.shape[0]), 1, 1)
-    elif mask.shape[0] != image.shape[0] and image.shape[0] % mask.shape[0] == 0:
-        mask = mask.repeat_interleave(int(image.shape[0] // mask.shape[0]), dim=0)
-    if mask.shape[0] != image.shape[0]:
-        raise ValueError(f"Union mask batch {mask.shape[0]} does not match decoded image batch {image.shape[0]}")
-    mask = mask.unsqueeze(1).to(device=image.device, dtype=image.dtype)
-    if mask.shape[-2:] != image.shape[1:3]:
-        mask = F.interpolate(mask, size=image.shape[1:3], mode="bilinear", align_corners=False)
-    return mask
-
-
-def _run_comfy_base_sampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise):
-    if comfy is None:
-        raise RuntimeError("ComfyUI sampler APIs are not importable")
-    latent = latent_image
-    latent_samples = latent["samples"]
-    latent_samples = comfy.sample.fix_empty_latent_channels(
-        model,
-        latent_samples,
-        latent.get("downscale_ratio_spacial", None),
-        latent.get("downscale_ratio_temporal", None),
-    )
-    batch_inds = latent.get("batch_index", None)
-    noise = comfy.sample.prepare_noise(latent_samples, seed, batch_inds)
-    noise_mask = latent.get("noise_mask", None)
-    callback = latent_preview.prepare_callback(model, steps) if latent_preview is not None else None
-    samples = comfy.sample.sample(
-        model,
-        noise,
-        steps,
-        cfg,
-        sampler_name,
-        scheduler,
-        positive,
-        negative,
-        latent_samples,
-        denoise=denoise,
-        noise_mask=noise_mask,
-        callback=callback,
-        disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
-        seed=seed,
-    )
-    out = latent.copy()
-    out.pop("downscale_ratio_spacial", None)
-    out.pop("downscale_ratio_temporal", None)
-    out["samples"] = samples
-    return out
-
-
-def _stack_union_mask(stack: K2RegionalLoraStack, target: torch.Tensor) -> torch.Tensor:
-    if not stack.enabled_regions:
-        width = int(target.shape[-1] * 8)
-        height = int(target.shape[-2] * 8)
-        return torch.zeros((target.shape[0], height, width), dtype=target.dtype, device=target.device)
-    union = None
-    for regional in stack.enabled_regions:
-        mask = regional.region.pixel_mask
-        if mask.shape[0] == 1 and target.shape[0] > 1:
-            mask = mask.repeat(target.shape[0], 1, 1)
-        union = mask if union is None else torch.maximum(union, mask)
-    return union.clamp(0.0, 1.0)
-
-
-def _stack_latent_union_mask(stack: K2RegionalLoraStack, target: torch.Tensor) -> torch.Tensor:
-    if not stack.enabled_regions:
-        if target.ndim == 5:
-            return torch.zeros(
-                (target.shape[0], 1, target.shape[2], target.shape[-2], target.shape[-1]),
-                dtype=target.dtype,
-                device=target.device,
-            )
-        return torch.zeros((target.shape[0], 1, target.shape[-2], target.shape[-1]), dtype=target.dtype, device=target.device)
-    union = None
-    for regional in stack.enabled_regions:
-        mask = regional.region.mask_for(target).to(device=target.device, dtype=target.dtype)
-        union = mask if union is None else torch.maximum(union, mask)
-    return union.clamp(0.0, 1.0)
-
-
-def _pin_latent_to_base_outside(samples, base_samples, stack):
-    mask = _stack_latent_union_mask(stack, samples["samples"])
-    out = samples.copy()
-    regional = samples["samples"]
-    base = base_samples["samples"].to(device=regional.device, dtype=regional.dtype)
-    out["samples"] = mask * regional + (1.0 - mask) * base
-    return out
-
-
-def _run_branch_lora_composite_fallback(
-    model,
-    base,
-    positive,
-    negative,
-    latent_image,
-    stack,
-    seed,
-    steps,
-    cfg,
-    sampler_name,
-    scheduler,
-    denoise,
-    debug_return_base_latent,
-):
-    base_latent = base["samples"]
-    active = stack.enabled_regions
-    if not active:
-        return (base, base.copy() if debug_return_base_latent else base, _stack_union_mask(stack, latent_image["samples"]), "No enabled regional LoRAs.")
-
-    debug_lines = [
-        "Used branch_lora_composite fallback: each regional LoRA is loaded through Comfy's normal LoRA path, "
-        "sampled as a separate branch, then only that branch's masked latent delta is composited back into the base latent.",
-        f"branch_count={len(active)} overlap_mode={stack.overlap_mode}",
-    ]
-    branch_deltas: list[tuple[K2RegionalLora, torch.Tensor, torch.Tensor]] = []
-    for index, regional in enumerate(active, start=1):
-        branch_model = make_lora_branch_model(
-            model,
-            regional.lora_name,
-            strength_model=regional.lora_strength,
-            attention_only_filter=regional.attention_only_filter,
-            ignore_text_encoder_lora=regional.ignore_text_encoder_lora,
-        )
-        branch = _run_comfy_base_sampler(
-            branch_model,
-            seed,
-            steps,
-            cfg,
-            sampler_name,
-            scheduler,
-            regional.positive if regional.positive is not None else positive,
-            regional.negative if regional.negative is not None else negative,
-            latent_image,
-            denoise,
-        )
-        branch_latent = branch["samples"].to(device=base_latent.device, dtype=base_latent.dtype)
-        mask = regional.region.mask_for(base_latent).to(device=base_latent.device, dtype=base_latent.dtype)
-        delta = (branch_latent - base_latent) * float(regional.delta_strength)
-        branch_deltas.append((regional, mask, delta))
-        debug_lines.append(
-            f"[{index}] {regional.lora_name}: lora_strength={regional.lora_strength:.3f} "
-            f"delta_strength={regional.delta_strength:.3f} mask_sum={float(mask.sum().detach().cpu()):.3f}"
-        )
-
-    out_latent = _compose_branch_deltas(base_latent, branch_deltas, stack.overlap_mode)
-    out = base.copy()
-    out["samples"] = out_latent
-    debug = "\n".join(debug_lines)
-    print(f"[K2 Regional LoRA]\n{debug}")
-    return (
-        out,
-        base.copy() if debug_return_base_latent else base,
-        _stack_union_mask(stack, latent_image["samples"]),
-        debug,
-    )
-
-
-def _compose_branch_deltas(base: torch.Tensor, branch_deltas, overlap_mode: str) -> torch.Tensor:
-    if not branch_deltas:
-        return base
-    if overlap_mode == "normalize":
-        total_delta = torch.zeros_like(base)
-        total_mask = torch.zeros_like(base[:, :1])
-        for _regional, mask, delta in branch_deltas:
-            total_delta = total_delta + mask * delta
-            total_mask = total_mask + mask
-        return base + total_delta / total_mask.clamp_min(1.0e-6)
-    if overlap_mode == "add_clamped":
-        total_delta = torch.zeros_like(base)
-        for _regional, mask, delta in branch_deltas:
-            total_delta = total_delta + mask * delta
-        return base + total_delta
-    if overlap_mode in ("priority_1", "priority_3"):
-        ordered = branch_deltas if overlap_mode == "priority_1" else list(reversed(branch_deltas))
-        out = base.clone()
-        claimed = torch.zeros_like(base[:, :1])
-        for _regional, mask, delta in ordered:
-            usable = (mask * (1.0 - claimed)).clamp(0.0, 1.0)
-            out = out + usable * delta
-            claimed = torch.maximum(claimed, mask)
-        return out
-    raise ValueError(f"Unsupported overlap_mode {overlap_mode}")
-
-
-def _run_layer_injection_fallback(
-    model,
-    base,
-    positive,
-    negative,
-    latent_image,
-    stack,
-    seed,
-    steps,
-    cfg,
-    sampler_name,
-    scheduler,
-    denoise,
-    layer_injection_targets,
-    layer_outside_strength,
-    layer_text_token_strength,
-    final_latent_pin,
-    debug_return_base_latent,
-):
-    patched_model, report = build_layer_injection_model(
-        model,
-        stack,
-        target_policy=layer_injection_targets,
-        outside_strength=float(layer_outside_strength),
-        text_token_strength=float(layer_text_token_strength),
-        debug=False,
-    )
-    regional = _run_comfy_base_sampler(patched_model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise)
-    pinned = False
-    if final_latent_pin:
-        regional = _pin_latent_to_base_outside(regional, base, stack)
-        pinned = True
-    debug = (
-        "Used layer-injection fallback: LoRA deltas are written only to masked regional token streams "
-        "on cloned model layer hooks, then the final latent is pinned outside the union mask to base. "
-        f"final_latent_pin={pinned}\n{report}"
-    )
-    return (regional, base.copy() if debug_return_base_latent else base, _stack_union_mask(stack, latent_image["samples"]), debug)
-
-
-def _run_adapter_regional_sampler(
-    adapter,
-    model,
-    positive,
-    negative,
-    latent_image,
-    stack,
-    seed,
-    steps,
-    cfg,
-    pin_outside_regions,
-):
-    initial = latent_image["samples"]
-    branches = {
-        regional.lora_name: make_lora_branch_model(
-            model,
-            regional.lora_name,
-            strength_model=regional.lora_strength,
-            attention_only_filter=regional.attention_only_filter,
-            ignore_text_encoder_lora=regional.ignore_text_encoder_lora,
-        )
-        for regional in stack.enabled_regions
-    }
-    schedule = adapter.schedule(model=model, steps=steps, seed=seed)
-
-    def predict(branch_name, x, sigma, cond, uncond):
-        branch_model = model if branch_name == "base" else branches[branch_name]
-        return adapter.guided_predict(branch_model, x, cond, uncond, cfg, sigma)
-
-    regional, base, _latent_union, debug = run_regional_velocity_sampler(
-        initial=initial,
-        stack=stack,
-        base_positive=positive,
-        base_negative=negative,
-        cfg=cfg,
-        schedule=schedule,
-        predict=predict,
-        pin_outside_regions=pin_outside_regions,
-    )
-    out = latent_image.copy()
-    out["samples"] = regional
-    base_out = latent_image.copy()
-    base_out["samples"] = base
-    return (out, base_out, _stack_union_mask(stack, initial), debug.to_text())
+        return ("\n".join(lines),)

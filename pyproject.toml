@@ -1,10 +1,9 @@
 [project]
-name = "comfyui-krea-region-lora"
-description = "Krea 2 regional attention LoRA nodes for ComfyUI using masked prediction-delta blending."
+name = "krea-regional-lora-attention"
 version = "0.1.0"
+description = "ComfyUI nodes for Krea-style regional LoRA delta tracking and asymmetric attention masking"
 requires-python = ">=3.10"
+dependencies = []
 
-[tool.comfy]
-PublisherId = "wolfhard"
-DisplayName = "Krea 2 Regional Attention LoRA"
-Icon = ""
+[tool.ruff]
+line-length = 140

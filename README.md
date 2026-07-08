@@ -1,67 +1,61 @@
-# ComfyUI Krea 2 Regional Attention-LoRA
+# Krea Regional LoRA Attention
 
-Custom node pack for binding up to three character attention LoRAs to KJNodes bbox regions for Krea 2 workflows.
+ComfyUI custom nodes for regional LoRA application on Krea-style transformer diffusion models.
 
-The implemented core uses regional prediction-delta blending:
-
-1. Keep a base no-LoRA trajectory.
-2. Keep a regional trajectory.
-3. For each active region, compute a complete guided branch prediction, subtract the base guided prediction, and apply only the masked delta.
-4. Resolve overlaps.
-5. Pin everything outside the union mask back to the base trajectory after every step.
+The main node applies LoRA deltas only to selected image-token regions, tracks which image tokens were actually modified, and injects an asymmetric attention bias so unmodified image tokens are penalized or blocked from attending to LoRA-modified image tokens.
 
 ## Nodes
 
-- `K2 BBox To Regional Mask`
-- `K2 Regional Character LoRA`
-- `K2 Regional LoRA Stack 3`
-- `K2 Regional Layer LoRA Apply`
-- `K2 Regional Attention LoRA Sampler`
-- `K2 Regional Decode Composite`
+- `Krea BBox To Regional Tokens`
+- `Krea Regional LoRA`
+- `Krea Regional LoRA Stack`
+- `Krea Regional LoRA Apply`
+- `Krea Regional LoRA Debug`
 
-## BBox Format
+## KJNodes Ideogram 4 Compatibility
 
-KJNodes bboxes default to `xywh`: `(x_min, y_min, width, height)`. The mask node also supports `xyxy`.
-
-KJ displays boxes as `1`, `2`, `3`, etc. The mask node follows that numbering for `bbox_index`; `0` is also accepted as an alias for the first box for older workflows.
-
-Krea 2 token snapping defaults to 16 output pixels, matching VAE compression 8 and DiT patch size 2.
-
-## Sampling Modes
-
-The sampler has two regional paths:
-
-1. Strict adapter path. If the model exposes `k2_regional_velocity_predictor`, the sampler uses post-CFG regional prediction deltas and pins outside-region latent values back to the base trajectory after every denoising step. This is the strongest anti-leakage path.
-
-2. Layer-injection fallback. If no strict adapter is present and `execution_mode=auto`, the sampler clones the model, installs temporary layer hooks, applies LoRA activation deltas only on masked regional token streams, runs normal Comfy sampling, then pins the final latent outside the union mask back to `base_samples`. This makes the node usable in ordinary ComfyUI Krea workflows while avoiding a global character LoRA load.
-
-An adapter object can be attached to the model as `k2_regional_velocity_predictor` and must provide:
+KJNodes `Ideogram 4 Prompt Builder KJ` outputs `bboxes` as Comfy `BoundingBox` data:
 
 ```python
-schedule(model, steps, seed) -> Sequence[float]
-guided_predict(model, x, positive, negative, cfg, sigma_or_t) -> torch.Tensor
+[[{"x": 128, "y": 96, "width": 384, "height": 640}, ...]]
 ```
 
-## Layer-Injection Fallback
+Connect that `bboxes` output to `Krea BBox To Regional Tokens` input `bboxes`.
 
-The fallback is based on the "stamp only where the token writes back" idea:
+`bbox_index` follows the visual numbering used by the KJ editor: `1` is the first box, `2` is the second box, and so on. `0` is accepted as an alias for the first box.
 
-- Q/K/V-only masking is not used for isolation.
-- The default `attn_out_mlp` target masks LoRA deltas on attention output projections and MLP layers.
-- `outside_strength=0.0` keeps image-token LoRA deltas out of unassigned regions.
-- `text_token_strength=0.0` avoids applying character LoRA deltas to text tokens in the fallback.
-- Hooks are installed on a cloned model and removed after each diffusion-model call by ComfyUI's wrapper mechanism.
+## Workflow
 
-This fallback is not as mathematically strict as per-step sampler pinning because attention can still mix information after a regional write. It mitigates that weakness by reapplying the regional write repeatedly across layers/steps and by final-pinning the latent outside the region to the base result.
+1. Draw regions in `Ideogram 4 Prompt Builder KJ`.
+2. Connect its `bboxes`, `width`, and `height` to `Krea BBox To Regional Tokens`.
+3. Create one `Krea Regional LoRA` per region.
+4. Combine them with `Krea Regional LoRA Stack`.
+5. Run `Krea Regional LoRA Apply` on the model before your normal KSampler.
 
-You can also use `K2 Regional Layer LoRA Apply` directly before a normal sampler. The all-in-one sampler node is usually easier because it also returns `base_samples`, `union_mask`, and applies final latent pinning.
+## Important Controls
 
-## Testing
+- `measurement_sources`: comma-separated sources. `direct_delta` is implemented and used by default.
+- `normalization`: `relative_norm`, `percentile`, `minmax`, or `raw`.
+- `modified_threshold`: token score threshold for marking a token modified by that LoRA.
+- `retention`: `sticky`, `decay`, or `instant`.
+- `attention_isolation_strength`: attention penalty from unmodified image-token queries to modified image-token keys.
+- `cross_lora_mode`: `allow`, `penalize`, or `block` attention between different LoRA-modified token sets.
 
-Run:
+## Implementation Notes
+
+The package uses ComfyUI model patcher wrappers and `transformer_options["optimized_attention_override"]`, which are present in current ComfyUI. It does not require running a custom sampler.
+
+The model patch is conservative:
+
+- Text-token LoRA application defaults to `0.0`.
+- Outside-region LoRA delta application defaults to `0.0`.
+- Text encoder LoRA keys are ignored by default.
+- Attention masking only activates when the attention call is self-attention over a sequence length that matches the tracked image-token layout.
+
+## Local Checks
+
+These tests do not launch ComfyUI:
 
 ```bash
-/home/wolfhard/ComfyUI/311venv/bin/python run_tests.py
+python run_tests.py
 ```
-
-The tests cover KJ bbox conversion, xyxy conversion, empty/disabled regions, fake global LoRA deltas, exact outside pinning, three disjoint regions, overlap modes, LoRA key filtering, writeback key selection, and batch shapes.
