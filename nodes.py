@@ -5,11 +5,18 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from krea_region_lora.engine import run_regional_velocity_sampler
-from krea_region_lora.layer_injection import build_layer_injection_model
-from krea_region_lora.lora import make_lora_branch_model
-from krea_region_lora.masks import debug_bbox_image, infer_image_size, region_from_bbox
-from krea_region_lora.types import K2RegionalLora, K2RegionalLoraStack
+try:
+    from .krea_region_lora.engine import run_regional_velocity_sampler
+    from .krea_region_lora.layer_injection import build_layer_injection_model
+    from .krea_region_lora.lora import make_lora_branch_model
+    from .krea_region_lora.masks import debug_bbox_image, infer_image_size, region_from_bbox
+    from .krea_region_lora.types import K2RegionalLora, K2RegionalLoraStack
+except ImportError:
+    from krea_region_lora.engine import run_regional_velocity_sampler
+    from krea_region_lora.layer_injection import build_layer_injection_model
+    from krea_region_lora.lora import make_lora_branch_model
+    from krea_region_lora.masks import debug_bbox_image, infer_image_size, region_from_bbox
+    from krea_region_lora.types import K2RegionalLora, K2RegionalLoraStack
 
 try:
     import comfy.sample  # type: ignore
