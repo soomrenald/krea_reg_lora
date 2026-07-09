@@ -86,12 +86,15 @@ def region_from_bbox(
     pixel_mask = make_pixel_mask(pixel_bbox, width=width, height=height, feather_px=feather_px, batch_size=mask_batch)
     latent_mask = pixel_to_latent_mask(pixel_mask)
     token_mask = pixel_to_token_mask(pixel_mask)
+    token_grid = (max(1, pixel_mask.shape[-2] // KREA_TOKEN_PIXELS), max(1, pixel_mask.shape[-1] // KREA_TOKEN_PIXELS))
     return KreaRegion(
         region_id=f"bbox_{int(bbox_index)}_{pixel_bbox[0]}_{pixel_bbox[1]}_{pixel_bbox[2]}_{pixel_bbox[3]}",
         pixel_bbox=pixel_bbox,
         normalized_bbox=_normalized_bbox(pixel_bbox, int(width), int(height)),
         image_size=(int(width), int(height)),
         feather_px=int(feather_px),
+        img_len=int(token_mask.shape[1]),
+        text_len=None,
         pixel_mask=pixel_mask,
         latent_mask=latent_mask,
         token_mask=token_mask,
@@ -103,6 +106,7 @@ def region_from_bbox(
             "feather_px": int(feather_px),
             "snap_to_krea_token_grid": bool(snap_to_krea_token_grid),
             "bbox_count": len(bbox_list),
+            "token_grid": token_grid,
         },
     )
 

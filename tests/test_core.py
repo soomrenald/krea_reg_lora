@@ -49,14 +49,15 @@ def test_token_and_latent_masks_match_krea_grid_defaults():
     assert torch.all(region.latent_mask[:, :, 2:4, 2:4] == 1)
 
 
-def test_sequence_mask_places_image_tokens_at_sequence_tail():
+def test_sequence_mask_places_image_tokens_after_text_before_padding():
     region = make_region()
     regional = make_lora(region)
-    x = torch.zeros((1, 20, 8))
-    mask = sequence_mask_for_region(regional, x, outside_strength=0.0, text_token_strength=0.0)
-    assert mask.shape == (1, 20, 1)
-    assert torch.count_nonzero(mask[:, :4]) == 0
-    assert torch.count_nonzero(mask[:, 4:]) == torch.count_nonzero(region.token_mask)
+    x = torch.zeros((1, 22, 8))
+    mask = sequence_mask_for_region(regional, x, outside_strength=0.0, text_token_strength=0.0, text_len=3, img_len=16)
+    assert mask.shape == (1, 22, 1)
+    assert torch.count_nonzero(mask[:, :3]) == 0
+    assert torch.count_nonzero(mask[:, 3:19]) == torch.count_nonzero(region.token_mask)
+    assert torch.count_nonzero(mask[:, 19:]) == 0
 
 
 def test_direct_delta_tracking_marks_only_changed_region_tokens():
@@ -64,9 +65,11 @@ def test_direct_delta_tracking_marks_only_changed_region_tokens():
     regional = make_lora(region, threshold=0.01)
     stack = KreaRegionalLoraStack((regional,), attention_isolation_strength=5.0)
     state = RegionalRuntimeState(stack)
-    delta = torch.zeros((1, 20, 4))
-    reference = torch.ones((1, 20, 4))
-    mask = sequence_mask_for_region(regional, delta, outside_strength=0.0, text_token_strength=0.0)
+    state.text_len = 3
+    state.img_len = 16
+    delta = torch.zeros((1, 22, 4))
+    reference = torch.ones((1, 22, 4))
+    mask = sequence_mask_for_region(regional, delta, outside_strength=0.0, text_token_strength=0.0, text_len=3, img_len=16)
     delta = delta + mask * 1.0
     flags = state.update_from_delta(regional, delta, reference)
     assert flags.shape == (1, 16)
@@ -82,10 +85,12 @@ def test_multi_source_tracking_averages_normalized_measurements():
     region = make_region()
     regional = make_lora(region, threshold=0.4)
     state = RegionalRuntimeState(KreaRegionalLoraStack((regional,), attention_isolation_strength=5.0))
-    direct = torch.zeros((1, 20, 4))
-    hidden = torch.zeros((1, 20, 4))
-    reference = torch.ones((1, 20, 4))
-    mask = sequence_mask_for_region(regional, hidden, outside_strength=0.0, text_token_strength=0.0)
+    state.text_len = 3
+    state.img_len = 16
+    direct = torch.zeros((1, 22, 4))
+    hidden = torch.zeros((1, 22, 4))
+    reference = torch.ones((1, 22, 4))
+    mask = sequence_mask_for_region(regional, hidden, outside_strength=0.0, text_token_strength=0.0, text_len=3, img_len=16)
     hidden = hidden + mask * 1.0
     flags = state.update_from_measurements(regional, [(direct, reference), (hidden, reference)])
     assert flags.shape == (1, 16)
@@ -136,16 +141,19 @@ def test_attention_bias_blocks_unmodified_queries_to_modified_keys():
     regional = make_lora(region, threshold=0.01)
     stack = KreaRegionalLoraStack((regional,), attention_isolation_strength=7.0)
     state = RegionalRuntimeState(stack)
+    state.text_len = 3
+    state.img_len = 16
     state.flags[id(regional)] = region.token_mask.squeeze(-1).bool()
-    bias = state.build_attention_bias(batch=1, q_len=20, k_len=20, heads=2, device=torch.device("cpu"), dtype=torch.float32)
+    bias = state.build_attention_bias(batch=1, q_len=22, k_len=22, heads=2, device=torch.device("cpu"), dtype=torch.float32)
     assert bias is not None
-    assert bias.shape == (2, 20, 20)
-    image_start = 4
+    assert bias.shape == (2, 22, 22)
+    image_start = 3
     modified = state.flags[id(regional)][0]
     modified_index = image_start + int(torch.nonzero(modified)[0])
     unmodified_index = image_start + int(torch.nonzero(~modified)[0])
     assert bias[0, unmodified_index, modified_index] == -7.0
     assert bias[0, modified_index, unmodified_index] == 0.0
+    assert bias[0, 20, modified_index] == 0.0
 
 
 def test_cross_lora_penalty_is_separate_from_background_penalty():
@@ -171,6 +179,8 @@ def test_region_carries_canonical_identity_and_normalized_bbox():
     assert region.pixel_bbox == (16, 16, 32, 32)
     assert region.normalized_bbox == (0.25, 0.25, 0.5, 0.5)
     assert region.feather_px == 0
+    assert region.img_len == 16
+    assert region.text_len is None
 
 
 def test_regional_conditioning_stack_preserves_order_and_region_ids():
@@ -199,3 +209,16 @@ def test_prompt_lora_match_report_uses_shared_region_id():
     lora_stack = KreaRegionalLoraStack((make_lora(region, "same"),))
     report = region_ids_match_lora(conditioning_stack, lora_stack)
     assert f"region_id={region.region_id} shared_with_lora=True" in report
+
+
+def test_runtime_layout_report_includes_padding_span():
+    region = make_region()
+    regional = make_lora(region)
+    state = RegionalRuntimeState(KreaRegionalLoraStack((regional,), attention_isolation_strength=5.0))
+    state.text_len = 3
+    state.img_len = 16
+    layout = state.layout_for(regional, 22)
+    assert layout is not None
+    assert (layout.img_start, layout.img_end, layout.pad_len) == (3, 19, 3)
+    report = state.report()
+    assert "seq_len=22 text_len=3 img_len=16 pad_len=3 img_start=3 img_end=19" in report

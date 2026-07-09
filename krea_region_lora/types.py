@@ -25,6 +25,8 @@ class KreaRegion:
     normalized_bbox: tuple[float, float, float, float]
     image_size: tuple[int, int]
     feather_px: int
+    img_len: int
+    text_len: int | None
     pixel_mask: torch.Tensor
     latent_mask: torch.Tensor
     token_mask: torch.Tensor

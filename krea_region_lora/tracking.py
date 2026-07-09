@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+import math
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
 from .types import KreaRegionalLora, KreaRegionalLoraStack
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SequenceLayout:
+    seq_len: int
+    text_len: int
+    img_len: int
+    pad_len: int
+    img_start: int
+    img_end: int
 
 
 @dataclass
@@ -16,12 +32,56 @@ class RegionalRuntimeState:
     influence: dict[int, torch.Tensor] = field(default_factory=dict)
     score_sums: dict[int, float] = field(default_factory=dict)
     updates: dict[int, int] = field(default_factory=dict)
+    text_len: int | None = None
+    img_len: int | None = None
+    image_rows: int | None = None
+    image_cols: int | None = None
+    seq_len: int | None = None
+    pad_len: int | None = None
+    img_start: int | None = None
+    img_end: int | None = None
+    mask_ranges: dict[int, tuple[int, int] | None] = field(default_factory=dict)
+    logged_layouts: set[tuple[int, int, int, int, int, int]] = field(default_factory=set)
 
     def reset(self) -> None:
         self.flags.clear()
         self.influence.clear()
         self.score_sums.clear()
         self.updates.clear()
+        self.text_len = None
+        self.img_len = None
+        self.image_rows = None
+        self.image_cols = None
+        self.seq_len = None
+        self.pad_len = None
+        self.img_start = None
+        self.img_end = None
+        self.mask_ranges.clear()
+        self.logged_layouts.clear()
+
+    def capture_layout(self, args: tuple[Any, ...], kwargs: dict[str, Any], model_obj: Any) -> None:
+        context = kwargs.get("context")
+        if context is None and len(args) > 2:
+            context = args[2]
+        if torch.is_tensor(context) and context.ndim >= 3:
+            self.text_len = int(context.shape[1])
+
+        latent = kwargs.get("x")
+        if latent is None and args:
+            latent = args[0]
+        if torch.is_tensor(latent) and latent.ndim >= 4:
+            patch = int(getattr(model_obj, "patch", getattr(model_obj, "patch_size", 2)) or 2)
+            h = int(latent.shape[-2])
+            w = int(latent.shape[-1])
+            rows = max(1, math.ceil(h / patch))
+            cols = max(1, math.ceil(w / patch))
+            self.image_rows = rows
+            self.image_cols = cols
+            self.img_len = rows * cols
+        elif self.img_len is None:
+            lengths = {int(r.region.img_len) for r in self.stack.enabled_regions if int(r.region.img_len) > 0}
+            if len(lengths) == 1:
+                self.img_len = next(iter(lengths))
 
     def update_from_delta(self, regional: KreaRegionalLora, delta: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
         return self.update_from_measurements(regional, [(delta, reference)])
@@ -34,12 +94,10 @@ class RegionalRuntimeState:
             raise ValueError(f"Expected sequence delta tensor, got {tuple(first_delta.shape)}")
         seq_len = int(first_delta.shape[-2])
         batch = int(first_delta.shape[0])
-        img_len = int(regional.region.token_mask.shape[1])
-        if img_len <= 0:
-            return first_delta.new_zeros((batch, seq_len), dtype=torch.bool)
-        if seq_len < img_len:
+        layout = self.layout_for(regional, seq_len)
+        img_len = int(regional.region.img_len)
+        if layout is None:
             return first_delta.new_zeros((batch, img_len), dtype=torch.bool)
-        img_start = seq_len - img_len
 
         scores = []
         for delta, reference in measurements:
@@ -51,8 +109,8 @@ class RegionalRuntimeState:
             ref = torch.linalg.vector_norm(reference.float(), dim=-1).clamp_min(1.0e-6)
             scores.append(_normalize_score(raw, ref, regional.normalization, regional.percentile))
         score = torch.stack(scores, dim=0).mean(dim=0)
-        image_score = score[:, img_start:img_start + img_len]
-        image_region = _token_mask_for(regional, batch, first_delta.device, score.dtype)
+        image_score = score[:, layout.img_start:layout.img_end]
+        image_region = _token_mask_for(regional, batch, first_delta.device, score.dtype, layout.img_len, self.image_rows, self.image_cols)
         image_score = image_score * image_region.squeeze(-1)
         new_flags = image_score > float(regional.threshold)
 
@@ -78,6 +136,19 @@ class RegionalRuntimeState:
         self.influence[key] = final_influence.detach()
         self.score_sums[key] = self.score_sums.get(key, 0.0) + float(image_score.mean().detach().cpu())
         self.updates[key] = self.updates.get(key, 0) + 1
+        self._record_mask_range(key, final_flags, layout.img_start)
+        if self.debug:
+            LOGGER.info(
+                "[KreaRegionalLoRA] region_id=%s seq_len=%d text_len=%d img_len=%d pad_len=%d img_start=%d img_end=%d nonzero_mask_range=%s",
+                regional.region.region_id,
+                layout.seq_len,
+                layout.text_len,
+                layout.img_len,
+                layout.pad_len,
+                layout.img_start,
+                layout.img_end,
+                self.mask_ranges.get(key),
+            )
         return final_flags
 
     def attention_override(self, func, *args, **kwargs):
@@ -113,22 +184,25 @@ class RegionalRuntimeState:
     ) -> torch.Tensor | None:
         if q_len != k_len:
             return None
-        img_len = _matching_img_len(self.stack.enabled_regions, q_len)
-        if img_len is None:
+        regional_layouts = [(regional, self.layout_for(regional, q_len)) for regional in self.stack.enabled_regions]
+        regional_layouts = [(regional, layout) for regional, layout in regional_layouts if layout is not None]
+        if not regional_layouts:
             return None
-        img_start = q_len - img_len
+        first_layout = regional_layouts[0][1]
+        assert first_layout is not None
         image_tokens = torch.zeros((batch, q_len), dtype=torch.bool, device=device)
-        image_tokens[:, img_start:] = True
+        image_tokens[:, first_layout.img_start:first_layout.img_end] = True
         bias = torch.zeros((batch, q_len, k_len), dtype=torch.float32, device=device)
         full_flags: list[torch.Tensor] = []
-        for regional in self.stack.enabled_regions:
+        for regional, layout in regional_layouts:
+            assert layout is not None
             flags = self.flags.get(id(regional))
             if flags is None:
                 full = torch.zeros((batch, q_len), dtype=torch.bool, device=device)
             else:
                 flags = _fit_batch(flags.to(device=device, dtype=torch.bool), batch)
                 full = torch.zeros((batch, q_len), dtype=torch.bool, device=device)
-                full[:, img_start:img_start + min(img_len, flags.shape[1])] = flags[:, :img_len]
+                full[:, layout.img_start:layout.img_end] = flags[:, :layout.img_len]
             full_flags.append(full)
             if self.stack.attention_isolation_strength > 0:
                 query = image_tokens & ~full
@@ -146,11 +220,49 @@ class RegionalRuntimeState:
             return None
         return bias[:, None, :, :].repeat(1, max(1, int(heads)), 1, 1).reshape(batch * max(1, int(heads)), q_len, k_len).to(dtype=dtype)
 
+    def layout_for(self, regional: KreaRegionalLora, seq_len: int) -> SequenceLayout | None:
+        img_len = int(self.img_len or regional.region.img_len)
+        if img_len <= 0 or img_len > seq_len:
+            return None
+        if self.text_len is not None:
+            text_len = int(self.text_len)
+        elif regional.region.text_len is not None:
+            text_len = int(regional.region.text_len)
+        elif seq_len == img_len:
+            text_len = 0
+        else:
+            return None
+        img_start = text_len
+        img_end = img_start + img_len
+        if img_start < 0 or img_end > seq_len:
+            return None
+        layout = SequenceLayout(seq_len=seq_len, text_len=text_len, img_len=img_len, pad_len=seq_len - img_end, img_start=img_start, img_end=img_end)
+        self.seq_len = layout.seq_len
+        self.text_len = layout.text_len
+        self.img_len = layout.img_len
+        self.pad_len = layout.pad_len
+        self.img_start = layout.img_start
+        self.img_end = layout.img_end
+        layout_key = (layout.seq_len, layout.text_len, layout.img_len, layout.pad_len, layout.img_start, layout.img_end)
+        if self.debug and layout_key not in self.logged_layouts:
+            self.logged_layouts.add(layout_key)
+            LOGGER.info(
+                "[KreaRegionalLoRA] token layout seq_len=%d text_len=%d img_len=%d pad_len=%d img_start=%d img_end=%d",
+                layout.seq_len,
+                layout.text_len,
+                layout.img_len,
+                layout.pad_len,
+                layout.img_start,
+                layout.img_end,
+            )
+        return layout
+
     def report(self) -> str:
         lines = [
             f"enabled_regions={len(self.stack.enabled_regions)}",
             f"attention_isolation_strength={self.stack.attention_isolation_strength:.3f}",
             f"cross_lora_mode={self.stack.cross_lora_mode} cross_lora_strength={self.stack.cross_lora_strength:.3f}",
+            f"layout seq_len={self.seq_len} text_len={self.text_len} img_len={self.img_len} pad_len={self.pad_len} img_start={self.img_start} img_end={self.img_end}",
         ]
         for index, regional in enumerate(self.stack.enabled_regions, start=1):
             key = id(regional)
@@ -158,8 +270,18 @@ class RegionalRuntimeState:
             marked = int(flags.sum().detach().cpu()) if flags is not None else 0
             updates = self.updates.get(key, 0)
             mean_score = self.score_sums.get(key, 0.0) / max(1, updates)
-            lines.append(f"[{index}] {regional.lora_name}: updates={updates} marked_tokens={marked} mean_score={mean_score:.5f}")
+            lines.append(
+                f"[{index}] {regional.lora_name}: updates={updates} marked_tokens={marked} "
+                f"mean_score={mean_score:.5f} nonzero_mask_range={self.mask_ranges.get(key)}"
+            )
         return "\n".join(lines)
+
+    def _record_mask_range(self, key: int, flags: torch.Tensor, img_start: int) -> None:
+        if flags.numel() == 0 or torch.count_nonzero(flags) == 0:
+            self.mask_ranges[key] = None
+            return
+        positions = torch.nonzero(flags, as_tuple=False)[:, -1]
+        self.mask_ranges[key] = (img_start + int(positions.min().detach().cpu()), img_start + int(positions.max().detach().cpu()))
 
 
 def _normalize_score(raw: torch.Tensor, reference: torch.Tensor, mode: str, percentile: float) -> torch.Tensor:
@@ -177,13 +299,31 @@ def _normalize_score(raw: torch.Tensor, reference: torch.Tensor, mode: str, perc
     return raw / reference
 
 
-def _token_mask_for(regional: KreaRegionalLora, batch: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    mask = regional.region.token_mask
-    if mask.shape[0] == 1 and batch > 1:
-        mask = mask.repeat(batch, 1, 1)
-    elif mask.shape[0] != batch:
-        mask = mask[:1].repeat(batch, 1, 1)
-    return mask.to(device=device, dtype=dtype)
+def _token_mask_for(
+    regional: KreaRegionalLora,
+    batch: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    img_len: int | None = None,
+    rows: int | None = None,
+    cols: int | None = None,
+) -> torch.Tensor:
+    target_len = int(img_len or regional.region.img_len)
+    token_mask = regional.region.token_mask
+    if int(token_mask.shape[1]) != target_len:
+        token_mask = _resize_token_mask(regional, target_len, rows, cols)
+    if token_mask.shape[0] == 1 and batch > 1:
+        token_mask = token_mask.repeat(batch, 1, 1)
+    elif token_mask.shape[0] != batch:
+        token_mask = token_mask[:1].repeat(batch, 1, 1)
+    return token_mask.to(device=device, dtype=dtype)
+
+
+def _resize_token_mask(regional: KreaRegionalLora, img_len: int, rows: int | None, cols: int | None) -> torch.Tensor:
+    if rows is not None and cols is not None and int(rows) * int(cols) == int(img_len):
+        return F.interpolate(regional.region.pixel_mask.unsqueeze(1), size=(int(rows), int(cols)), mode="area").clamp(0.0, 1.0).flatten(2).transpose(1, 2)
+    mask = regional.region.token_mask.transpose(1, 2)
+    return F.interpolate(mask, size=int(img_len), mode="linear", align_corners=False).clamp(0.0, 1.0).transpose(1, 2)
 
 
 def _combine_masks(existing: Any, bias: torch.Tensor) -> torch.Tensor:
@@ -200,13 +340,6 @@ def _fit_batch(flags: torch.Tensor, batch: int) -> torch.Tensor:
     if flags.shape[0] == 1:
         return flags.repeat(batch, 1)
     return flags[:1].repeat(batch, 1)
-
-
-def _matching_img_len(regions: tuple[KreaRegionalLora, ...], seq_len: int) -> int | None:
-    lengths = {int(r.region.token_mask.shape[1]) for r in regions if int(r.region.token_mask.shape[1]) <= seq_len}
-    if len(lengths) == 1:
-        return next(iter(lengths))
-    return None
 
 
 def _cross_strength(stack: KreaRegionalLoraStack) -> float:

@@ -84,6 +84,7 @@ class KreaBBoxToRegionalTokens:
             f"region_id={region.region_id} bbox={region.pixel_bbox} normalized_bbox={region.normalized_bbox} "
             f"image_size={region.image_size} feather_px={region.feather_px} "
             f"bbox_count={region.metadata.get('bbox_count', 0)} token_count={region.token_mask.shape[1]} "
+            f"img_len={region.img_len} text_len={region.text_len} "
             f"mask_min={float(region.pixel_mask.min()):.4f} mask_max={float(region.pixel_mask.max()):.4f} "
             f"mask_mean={float(region.pixel_mask.mean()):.4f}"
         )

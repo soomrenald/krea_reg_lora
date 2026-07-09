@@ -54,6 +54,7 @@ class RegionalLayerInjection:
         handles = []
         self._tensor_cache = {}
         try:
+            self.state.capture_layout(args, kwargs, model_obj)
             name_to_module = dict(model_obj.named_modules())
             for layer_name, patches in self.patches_by_layer.items():
                 module = name_to_module.get(layer_name)
@@ -87,6 +88,10 @@ class RegionalLayerInjection:
                     x,
                     outside_strength=self.outside_strength,
                     text_token_strength=self.text_token_strength,
+                    text_len=self.state.text_len,
+                    img_len=self.state.img_len,
+                    image_rows=self.state.image_rows,
+                    image_cols=self.state.image_cols,
                 )
                 if mask is None:
                     continue
@@ -210,6 +215,7 @@ def build_layer_injection_model(
         )
     _install_attention_override(model_out, state)
     report.add(f"Installed regional hooks on {len(patches_by_layer)} layers.")
+    report.add("Krea2 token layout: masks use text_len:text_len+img_len; padded tokens remain outside.")
     report.add("Installed optimized_attention_override for asymmetric modified-token masking.")
     return model_out, report.text()
 
@@ -228,30 +234,60 @@ def sequence_mask_for_region(
     *,
     outside_strength: float,
     text_token_strength: float,
+    text_len: int | None = None,
+    img_len: int | None = None,
+    image_rows: int | None = None,
+    image_cols: int | None = None,
 ) -> torch.Tensor | None:
     seq_len = int(x.shape[-2])
-    token_mask = regional.region.token_mask
-    img_len = int(token_mask.shape[1])
-    if img_len <= 0:
+    image_len = int(img_len or regional.region.img_len)
+    if image_len <= 0 or image_len > seq_len:
         return None
-    batch = int(x.shape[0])
-    if token_mask.shape[0] == 1 and batch > 1:
-        token_mask = token_mask.repeat(batch, 1, 1)
-    elif token_mask.shape[0] != batch:
-        token_mask = token_mask[:1].repeat(batch, 1, 1)
-    token_mask = token_mask.to(device=x.device, dtype=x.dtype)
-    if seq_len == img_len:
-        full = token_mask
-    elif seq_len > img_len:
-        full = torch.full((batch, seq_len, 1), float(text_token_strength), device=x.device, dtype=x.dtype)
-        full[:, seq_len - img_len:, :] = token_mask
+    if text_len is not None:
+        start = int(text_len)
+    elif regional.region.text_len is not None:
+        start = int(regional.region.text_len)
+    elif seq_len == image_len:
+        start = 0
     else:
         return None
+    end = start + image_len
+    if start < 0 or end > seq_len:
+        return None
+
+    batch = int(x.shape[0])
+    token_mask = _token_mask_for_layout(regional, batch, x.device, x.dtype, image_len, image_rows, image_cols)
+    full = torch.zeros((batch, seq_len, 1), device=x.device, dtype=x.dtype)
+    if text_token_strength and start > 0:
+        full[:, :start, :] = float(text_token_strength)
+    full[:, start:end, :] = token_mask
     if outside_strength:
         full = full + (1.0 - full) * float(outside_strength)
     while full.ndim < x.ndim:
         full = full.unsqueeze(1)
     return full
+
+
+def _token_mask_for_layout(
+    regional: KreaRegionalLora,
+    batch: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    img_len: int,
+    rows: int | None,
+    cols: int | None,
+) -> torch.Tensor:
+    token_mask = regional.region.token_mask
+    if int(token_mask.shape[1]) != int(img_len):
+        if rows is not None and cols is not None and int(rows) * int(cols) == int(img_len):
+            token_mask = F.interpolate(regional.region.pixel_mask.unsqueeze(1), size=(int(rows), int(cols)), mode="area").clamp(0.0, 1.0).flatten(2).transpose(1, 2)
+        else:
+            token_mask = F.interpolate(token_mask.transpose(1, 2), size=int(img_len), mode="linear", align_corners=False).clamp(0.0, 1.0).transpose(1, 2)
+    if token_mask.shape[0] == 1 and batch > 1:
+        token_mask = token_mask.repeat(batch, 1, 1)
+    elif token_mask.shape[0] != batch:
+        token_mask = token_mask[:1].repeat(batch, 1, 1)
+    return token_mask.to(device=device, dtype=dtype)
 
 
 def _install_attention_override(model_out: Any, state: RegionalRuntimeState) -> None:
