@@ -77,6 +77,8 @@ This layout will live in `RegionalRuntimeState`. `KREA_REGION` keeps static regi
 
 Krea2 is a single-stream transformer: prompt tokens and image tokens are concatenated into the same self-attention sequence. There is no separate cross-attention module to patch. The replacement implementation will therefore apply regional prompt effects inside transformer block hooks using text-token conditioning deltas.
 
+Warning: the pooled text hidden delta path is acceptable only as v1. It is transformer-internal and better than sampler CFG patching, but it is not equivalent to true regional prompt-token attention control. If pooled text deltas do not visibly affect subject placement, prioritize implementing regional prompt/image self-attention bias before tuning LoRA strengths.
+
 Implementation steps:
 
 1. `KreaRegionalPrompt` continues to encode each regional prompt with CLIP.
@@ -100,6 +102,14 @@ Implementation steps:
 
 This is intentionally inside the model forward/transformer layer execution, not after sampler CFG prediction.
 
+Hard implementation constraint: do not proceed with broad transformer patching until the exact Krea2 class/function/boundary being hooked is identified and logged. The implementation report/debug output must state the exact hook target:
+
+- class name
+- function name
+- whether hook is pre-attention, post-attention, post-MLP, or block output
+- hidden tensor shape at that boundary
+- whether the tensor includes text + image + padding tokens
+
 The pooled-delta implementation is only the first conditioning path. The hook architecture must also reserve a path for true self-attention bias between regional prompt text tokens and regional image tokens. This means regional prompt token ranges must be tracked as first-class runtime metadata, not collapsed permanently into a pooled vector.
 
 Regional prompt attention bias requirements:
@@ -108,7 +118,17 @@ Regional prompt attention bias requirements:
 2. Non-region image-token queries are penalized or forbidden from attending to those regional prompt-token keys.
 3. Regional prompt tokens do not globally influence all image tokens unless `outside_strength > 0`.
 
+Future/parallel attention-bias requirements:
+
+- image tokens inside a region may attend to that region's prompt tokens
+- image tokens outside the region are penalized/forbidden from attending to that region's prompt tokens
+- regional prompt tokens must not globally influence all image tokens unless `outside_strength > 0`
+- this must be separate from LoRA modified-token isolation
+- regional prompt token ranges must remain first-class runtime metadata, not be permanently collapsed into a pooled vector
+
 The implementation should preserve enough metadata to add this attention-bias path without rewriting regional prompt conditioning after pooled text deltas land.
+
+Tuning note: do not try to compensate for weak regional prompt placement by raising LoRA strength or delta strength first. If placement remains weak with correct masks, implement or enable regional prompt/image attention bias before escalating LoRA values.
 
 ## Regional LoRA Application
 
@@ -183,6 +203,14 @@ Debug reporting will include:
 - regional prompt token ranges when available
 - modified-token mask count and nonzero range
 - modified-token flags proving flagged tokens are inside the image span
+- regional prompt and regional LoRA same-mask verification fields:
+  - `regional_prompt.region_id`
+  - `regional_lora.region_id`
+  - regional prompt token-mask nonzero range
+  - regional LoRA token-mask nonzero range
+  - mask shape
+  - mask min/max/mean
+  - optional mask hash or checksum
 - attention-isolation mask stats
 - regional prompt/image attention-bias mask stats when enabled
 - per-layer direct delta stats
@@ -195,6 +223,7 @@ Implementation details:
 - Existing debug nodes will continue to preview static region masks.
 - Add either a debug image or a log/report view that shows the actual runtime token mask after layout capture. This must reflect the runtime token span and padding, not only the static bbox-to-token preview.
 - A new or extended debug report function will format the latest runtime state when available. If ComfyUI execution order cannot guarantee a post-sampler debug node, runtime details will still be available in logs.
+- If regional prompt and LoRA are fed from the same `KREA_REGION`, their runtime mask shape and nonzero token range should match. If not, log a warning.
 
 ## Files To Change
 
@@ -233,8 +262,15 @@ Expected files:
   - add a padding case proving padding tokens are unchanged
   - add a padding case proving only `image_start:image_end` receives the regional mask
   - add a padding case proving modified-token flags are only inside the image span
+  - add an all-zero region mask case proving regional prompt and regional LoRA cause zero changed image-token hidden states
+  - add an all-one image mask case proving regional prompt and regional LoRA can affect all image tokens and no text/padding tokens
+  - add a left-half image mask case proving only left-half image tokens receive nonzero regional prompt/LoRA deltas
+  - add a padding case proving padding tokens remain unchanged
+  - add a text-token case proving text tokens remain unchanged by regional LoRA
+  - add a modified-token case proving flags cannot appear outside `image_start:image_end`
   - cover isolation modes
   - cover regional prompt/image attention-bias mask construction when regional prompt token ranges are available
+  - cover same-`KREA_REGION` prompt/LoRA runtime mask alignment and warning behavior on mismatch
   - cover source combination/retention behavior
   - cover sampler fallback being opt-in
 
@@ -254,8 +290,9 @@ python3 -m py_compile nodes.py krea_region_lora/*.py tests/test_core.py
 
 Source checks:
 
-- no `seq_len - img_len` image-token placement except for computing `pad_len = seq_len - image_end`
-- no sampler CFG regional prompt path unless `conditioning_mode == "sampler_delta_conditioning"`
+- no regional prompt behavior runs through sampler CFG unless `conditioning_mode == "sampler_delta_conditioning"`
+- no image-token insertion uses `seq_len - img_len` except for image-only/no-padding cases or `pad_len` calculations
+- no static debug bbox mask is used as proof of actual runtime injection alignment
 - tests prove padding tokens remain unmasked
 - tests prove text tokens are unchanged by regional LoRA
 - tests prove modified-token flags cannot appear outside `image_start:image_end`
@@ -265,5 +302,6 @@ Manual workflow check:
 
 - Load `regional_prompt_conditioning_example.json`
 - Confirm `KreaRegionalConditioningApply` defaults to transformer hook mode
-- Confirm region 1 and region 2 feed both regional prompt and regional LoRA nodes from the same `KREA_REGION` outputs
+- Confirm the example workflow shows region 1 and region 2 feed both `KreaRegionalPrompt` and `KreaRegionalLoRA` from the exact same `KREA_REGION` output
 - Confirm debug output shows the verified hook insertion point and actual runtime token mask
+- Confirm debug output shows prompt and LoRA runtime masks align for each region
