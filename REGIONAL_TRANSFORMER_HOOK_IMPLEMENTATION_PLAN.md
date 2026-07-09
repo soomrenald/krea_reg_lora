@@ -127,6 +127,7 @@ Attention-bias implementation requirements:
    - hook boundary
    - hidden shape
    - attention shape
+   - active attention backend/path used for each hooked attention call, because additive attention-bias support may differ between torch SDPA, xformers, sage attention, and custom optimized attention
    - `text_len`
    - `image_len`
    - `pad_len`
