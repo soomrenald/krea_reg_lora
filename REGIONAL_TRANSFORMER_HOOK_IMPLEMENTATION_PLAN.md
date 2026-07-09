@@ -86,13 +86,29 @@ Implementation steps:
    - run `txtfusion`
    - run `txtmlp`
    - match dtype/device/batch to the current forward
-4. Hook Krea2 transformer blocks (`blocks.*`) or their attention output boundary.
-5. For each regional prompt, compute a regional text-conditioning delta against global text conditioning. Initial implementation will use a pooled text hidden delta per region, broadcast only onto the matching image-token mask.
-6. Add the regional prompt delta to hidden states only in `hidden[:, image_start:image_end]` where the soft region token mask is active.
-7. Leave text tokens and padding tokens unchanged.
-8. Log per-layer regional prompt delta stats when debug is enabled.
+4. Before implementing pooled text deltas, verify the exact insertion point available in the Krea2 block code and record whether the hook is:
+   - pre-attention
+   - post-attention
+   - post-MLP
+   - block output
+5. Expose the chosen insertion point as debug/config metadata if practical. If a user-facing selector is added, its default must be `post_attention` or `block_output`, not an arbitrary internal boundary.
+6. Hook Krea2 transformer blocks (`blocks.*`) at the verified attention output boundary or block output boundary. Do not proceed with pooled text deltas until this boundary is confirmed in code.
+7. For each regional prompt, compute a regional text-conditioning delta against global text conditioning. Initial implementation will use a pooled text hidden delta per region, broadcast only onto the matching image-token mask.
+8. Add the regional prompt delta to hidden states only in `hidden[:, image_start:image_end]` where the soft region token mask is active.
+9. Leave text tokens and padding tokens unchanged.
+10. Log per-layer regional prompt delta stats when debug is enabled.
 
 This is intentionally inside the model forward/transformer layer execution, not after sampler CFG prediction.
+
+The pooled-delta implementation is only the first conditioning path. The hook architecture must also reserve a path for true self-attention bias between regional prompt text tokens and regional image tokens. This means regional prompt token ranges must be tracked as first-class runtime metadata, not collapsed permanently into a pooled vector.
+
+Regional prompt attention bias requirements:
+
+1. Region image-token queries can attend to their matching regional prompt-token keys.
+2. Non-region image-token queries are penalized or forbidden from attending to those regional prompt-token keys.
+3. Regional prompt tokens do not globally influence all image tokens unless `outside_strength > 0`.
+
+The implementation should preserve enough metadata to add this attention-bias path without rewriting regional prompt conditioning after pooled text deltas land.
 
 ## Regional LoRA Application
 
@@ -132,6 +148,7 @@ Attention isolation will be implemented through the existing optimized attention
 Masks:
 
 - `image_tokens`: true only for `image_start:image_end`
+- `regional_prompt_tokens`: true only for runtime text-token ranges belonging to a regional prompt, when regional prompt token ranges are available
 - `modified_tokens`: true only for flagged image tokens
 - `unmodified_image_tokens`: image tokens not flagged
 - padding tokens: excluded from all regional masks
@@ -144,6 +161,14 @@ Controls:
 - `modified_outward_mode=none`: modified tokens may attend outward
 - `modified_outward_mode=penalize/forbid`: optionally penalize/block modified image queries attending to unmodified image keys
 - cross-region bias remains controlled by `cross_lora_mode`
+- regional prompt/image attention bias will be represented separately from LoRA modified-token isolation so text conditioning leakage can be controlled independently
+
+Regional prompt attention-bias behavior:
+
+- Matching region image queries to matching regional prompt keys: allowed.
+- Non-region image queries to regional prompt keys: penalized or forbidden according to the regional prompt isolation controls.
+- Regional prompt queries/keys must not create a global text-to-image influence path unless the region explicitly sets `outside_strength > 0`.
+- Padding rows and columns remain unaffected except for whatever base model mask already applies.
 
 ## Debug Output
 
@@ -154,8 +179,12 @@ Debug reporting will include:
 - `text_len`, `image_len`, `pad_len`
 - `image_start`, `image_end`
 - bbox-to-token mask stats and nonzero range
+- actual runtime token mask stats and nonzero range for each forward, based on `image_start:image_end`, not only the static bbox preview
+- regional prompt token ranges when available
 - modified-token mask count and nonzero range
+- modified-token flags proving flagged tokens are inside the image span
 - attention-isolation mask stats
+- regional prompt/image attention-bias mask stats when enabled
 - per-layer direct delta stats
 - per-layer hidden-state delta stats
 - optional final prediction delta stats when enabled
@@ -164,6 +193,7 @@ Implementation details:
 
 - `debug_logging=True` logs runtime per-forward/per-layer details to ComfyUI logs.
 - Existing debug nodes will continue to preview static region masks.
+- Add either a debug image or a log/report view that shows the actual runtime token mask after layout capture. This must reflect the runtime token span and padding, not only the static bbox-to-token preview.
 - A new or extended debug report function will format the latest runtime state when available. If ComfyUI execution order cannot guarantee a post-sampler debug node, runtime details will still be available in logs.
 
 ## Files To Change
@@ -199,7 +229,12 @@ Expected files:
 - `tests/test_core.py`
   - cover text/image/padding layout
   - cover no tail masking after padding
+  - add a padding case proving text tokens are unchanged by regional LoRA
+  - add a padding case proving padding tokens are unchanged
+  - add a padding case proving only `image_start:image_end` receives the regional mask
+  - add a padding case proving modified-token flags are only inside the image span
   - cover isolation modes
+  - cover regional prompt/image attention-bias mask construction when regional prompt token ranges are available
   - cover source combination/retention behavior
   - cover sampler fallback being opt-in
 
@@ -222,9 +257,13 @@ Source checks:
 - no `seq_len - img_len` image-token placement except for computing `pad_len = seq_len - image_end`
 - no sampler CFG regional prompt path unless `conditioning_mode == "sampler_delta_conditioning"`
 - tests prove padding tokens remain unmasked
+- tests prove text tokens are unchanged by regional LoRA
+- tests prove modified-token flags cannot appear outside `image_start:image_end`
+- debug output proves actual runtime token masks are available, not only static bbox previews
 
 Manual workflow check:
 
 - Load `regional_prompt_conditioning_example.json`
 - Confirm `KreaRegionalConditioningApply` defaults to transformer hook mode
 - Confirm region 1 and region 2 feed both regional prompt and regional LoRA nodes from the same `KREA_REGION` outputs
+- Confirm debug output shows the verified hook insertion point and actual runtime token mask
