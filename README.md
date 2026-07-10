@@ -52,21 +52,27 @@ Example prompt split:
 - `normalization`: `relative_norm`, `percentile`, `minmax`, or `raw`.
 - `modified_threshold`: token score threshold for marking a token modified by that LoRA.
 - `retention`: `sticky`, `decay`, or `instant`.
-- `attention_isolation_strength`: attention penalty from unmodified image-token queries to modified image-token keys.
+- `conditioning_mode`: `transformer_attention_bias` is the default. `sampler_delta_conditioning` is an experimental opt-in fallback.
+- `prompt_attention_mode`: `none`, `penalize`, or `forbid` regional prompt-token leakage outside the matching image-token mask.
+- `prompt_attention_strength`: penalty strength used by `prompt_attention_mode=penalize`.
+- `attention_isolation_mode`: `none`, `penalize`, or `forbid` unmodified image-token queries attending to LoRA-modified image-token keys.
+- `attention_isolation_strength`: penalty strength used by `attention_isolation_mode=penalize`.
+- `modified_outward_mode`: separately controls LoRA-modified image-token queries attending outward.
 - `cross_lora_mode`: `allow`, `penalize`, or `block` attention between different LoRA-modified token sets.
 
 ## Implementation Notes
 
 The package uses ComfyUI model patcher wrappers and `transformer_options["optimized_attention_override"]`, which are present in current ComfyUI. It does not require running a custom sampler.
 
-Regional prompts are applied with a sampler CFG patch. The normal global conditioning remains active everywhere. Each regional prompt is evaluated separately, its denoised effect is multiplied by the shared soft region mask, and that masked effect is added back to the global result.
+Regional prompts default to transformer attention bias. Each regional prompt conditioning tensor is appended as real Krea2 text tokens in the runtime self-attention sequence, its prompt-token range is tracked, and image-token queries outside the matching `KREA_REGION` mask are penalized or forbidden from attending to that regional prompt-token range. `sampler_delta_conditioning` remains available only as an explicitly selected experimental fallback.
 
 The model patch is conservative:
 
 - Text-token LoRA application defaults to `0.0`.
 - Outside-region LoRA delta application defaults to `0.0`.
 - Text encoder LoRA keys are ignored by default.
-- Attention masking only activates when the attention call is self-attention over a sequence length that matches the tracked image-token layout.
+- Regional prompt attention bias and LoRA modified-token isolation are separate additive attention-bias masks.
+- Attention masking only activates when the attention call is self-attention over a sequence length that matches the tracked text/image/padding layout.
 
 ## Local Checks
 

@@ -8,10 +8,11 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from .types import KreaRegionalLora, KreaRegionalLoraStack
+from .types import KreaRegion, KreaRegionalLora, KreaRegionalLoraStack
 
 
 LOGGER = logging.getLogger(__name__)
+FORBID_BIAS = 10000.0
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,16 @@ class SequenceLayout:
     pad_len: int
     img_start: int
     img_end: int
+
+
+@dataclass(frozen=True)
+class MaskStats:
+    shape: tuple[int, ...]
+    nonzero_range: tuple[int, int] | None
+    min: float
+    max: float
+    mean: float
+    checksum: float
 
 
 @dataclass
@@ -41,7 +52,9 @@ class RegionalRuntimeState:
     img_start: int | None = None
     img_end: int | None = None
     mask_ranges: dict[int, tuple[int, int] | None] = field(default_factory=dict)
+    lora_mask_stats: dict[str, MaskStats] = field(default_factory=dict)
     logged_layouts: set[tuple[int, int, int, int, int, int]] = field(default_factory=set)
+    logged_attention_calls: set[tuple[str, int, int, int, int, int]] = field(default_factory=set)
 
     def reset(self) -> None:
         self.flags.clear()
@@ -57,7 +70,9 @@ class RegionalRuntimeState:
         self.img_start = None
         self.img_end = None
         self.mask_ranges.clear()
+        self.lora_mask_stats.clear()
         self.logged_layouts.clear()
+        self.logged_attention_calls.clear()
 
     def capture_layout(self, args: tuple[Any, ...], kwargs: dict[str, Any], model_obj: Any) -> None:
         context = kwargs.get("context")
@@ -110,7 +125,8 @@ class RegionalRuntimeState:
             scores.append(_normalize_score(raw, ref, regional.normalization, regional.percentile))
         score = torch.stack(scores, dim=0).mean(dim=0)
         image_score = score[:, layout.img_start:layout.img_end]
-        image_region = _token_mask_for(regional, batch, first_delta.device, score.dtype, layout.img_len, self.image_rows, self.image_cols)
+        image_region = token_mask_for_region(regional.region, batch, first_delta.device, score.dtype, layout.img_len, self.image_rows, self.image_cols)
+        self.lora_mask_stats[regional.region.region_id] = mask_stats(image_region.squeeze(-1), offset=layout.img_start)
         image_score = image_score * image_region.squeeze(-1)
         new_flags = image_score > float(regional.threshold)
 
@@ -138,8 +154,10 @@ class RegionalRuntimeState:
         self.updates[key] = self.updates.get(key, 0) + 1
         self._record_mask_range(key, final_flags, layout.img_start)
         if self.debug:
+            stats = self.lora_mask_stats[regional.region.region_id]
             LOGGER.info(
-                "[KreaRegionalLoRA] region_id=%s seq_len=%d text_len=%d img_len=%d pad_len=%d img_start=%d img_end=%d nonzero_mask_range=%s",
+                "[KreaRegionalLoRA] region_id=%s seq_len=%d text_len=%d img_len=%d pad_len=%d img_start=%d img_end=%d "
+                "modified_nonzero_range=%s lora_mask_range=%s mask_shape=%s mask_min=%.4f mask_max=%.4f mask_mean=%.4f mask_checksum=%.4f",
                 regional.region.region_id,
                 layout.seq_len,
                 layout.text_len,
@@ -148,6 +166,12 @@ class RegionalRuntimeState:
                 layout.img_start,
                 layout.img_end,
                 self.mask_ranges.get(key),
+                stats.nonzero_range,
+                stats.shape,
+                stats.min,
+                stats.max,
+                stats.mean,
+                stats.checksum,
             )
         return final_flags
 
@@ -163,14 +187,38 @@ class RegionalRuntimeState:
         if q_len != k_len:
             return func(*args, **kwargs)
         batch = int(q.shape[0])
+        backend = attention_backend_name(func)
         bias = self.build_attention_bias(batch, q_len, k_len, int(heads), q.device, q.dtype)
         if bias is None:
             return func(*args, **kwargs)
+        if not additive_bias_supported(func):
+            raise RuntimeError(f"Active attention backend/path {backend} cannot accept additive attention bias")
+        if self.debug:
+            layout = self.layout_for(self.stack.enabled_regions[0], q_len) if self.stack.enabled_regions else None
+            if layout is not None:
+                key = (backend, layout.seq_len, layout.text_len, layout.img_len, layout.img_start, layout.img_end)
+                if key not in self.logged_attention_calls:
+                    self.logged_attention_calls.add(key)
+                    LOGGER.info(
+                        "[KreaRegionalLoRA] attention class=%s function=%s hook_boundary=%s hidden_shape=%s attention_shape=%s "
+                        "text_len=%d image_len=%d pad_len=%d image_start=%d image_end=%d backend=%s",
+                        "comfy.ldm.krea2.model.Attention",
+                        "Attention.forward",
+                        "optimized_attention_masked mask argument",
+                        tuple(q.shape),
+                        tuple(bias.shape),
+                        layout.text_len,
+                        layout.img_len,
+                        layout.pad_len,
+                        layout.img_start,
+                        layout.img_end,
+                        backend,
+                    )
         args = list(args)
         if len(args) >= 5:
-            args[4] = _combine_masks(args[4], bias)
+            args[4] = combine_attention_masks(args[4], bias)
         else:
-            kwargs["mask"] = _combine_masks(kwargs.get("mask"), bias)
+            kwargs["mask"] = combine_attention_masks(kwargs.get("mask"), bias)
         return func(*args, **kwargs)
 
     def build_attention_bias(
@@ -197,17 +245,21 @@ class RegionalRuntimeState:
         for regional, layout in regional_layouts:
             assert layout is not None
             flags = self.flags.get(id(regional))
-            if flags is None:
-                full = torch.zeros((batch, q_len), dtype=torch.bool, device=device)
-            else:
+            full = torch.zeros((batch, q_len), dtype=torch.bool, device=device)
+            if flags is not None:
                 flags = _fit_batch(flags.to(device=device, dtype=torch.bool), batch)
-                full = torch.zeros((batch, q_len), dtype=torch.bool, device=device)
                 full[:, layout.img_start:layout.img_end] = flags[:, :layout.img_len]
             full_flags.append(full)
-            if self.stack.attention_isolation_strength > 0:
+            inward_strength = _mode_strength(self.stack.attention_isolation_mode, self.stack.attention_isolation_strength)
+            if inward_strength > 0:
                 query = image_tokens & ~full
                 key = full
-                bias = bias - float(self.stack.attention_isolation_strength) * (query[:, :, None] & key[:, None, :]).float()
+                bias = bias - inward_strength * (query[:, :, None] & key[:, None, :]).float()
+            outward_strength = _mode_strength(self.stack.modified_outward_mode, self.stack.modified_outward_strength)
+            if outward_strength > 0:
+                query = full
+                key = image_tokens & ~full
+                bias = bias - outward_strength * (query[:, :, None] & key[:, None, :]).float()
 
         cross_strength = _cross_strength(self.stack)
         if cross_strength > 0 and len(full_flags) > 1:
@@ -218,7 +270,7 @@ class RegionalRuntimeState:
 
         if torch.count_nonzero(bias) == 0:
             return None
-        return bias[:, None, :, :].repeat(1, max(1, int(heads)), 1, 1).reshape(batch * max(1, int(heads)), q_len, k_len).to(dtype=dtype)
+        return expand_bias_to_heads(bias, heads).to(dtype=dtype)
 
     def layout_for(self, regional: KreaRegionalLora, seq_len: int) -> SequenceLayout | None:
         img_len = int(self.img_len or regional.region.img_len)
@@ -260,7 +312,8 @@ class RegionalRuntimeState:
     def report(self) -> str:
         lines = [
             f"enabled_regions={len(self.stack.enabled_regions)}",
-            f"attention_isolation_strength={self.stack.attention_isolation_strength:.3f}",
+            f"attention_isolation_mode={self.stack.attention_isolation_mode} attention_isolation_strength={self.stack.attention_isolation_strength:.3f}",
+            f"modified_outward_mode={self.stack.modified_outward_mode} modified_outward_strength={self.stack.modified_outward_strength:.3f}",
             f"cross_lora_mode={self.stack.cross_lora_mode} cross_lora_strength={self.stack.cross_lora_strength:.3f}",
             f"layout seq_len={self.seq_len} text_len={self.text_len} img_len={self.img_len} pad_len={self.pad_len} img_start={self.img_start} img_end={self.img_end}",
         ]
@@ -299,8 +352,8 @@ def _normalize_score(raw: torch.Tensor, reference: torch.Tensor, mode: str, perc
     return raw / reference
 
 
-def _token_mask_for(
-    regional: KreaRegionalLora,
+def token_mask_for_region(
+    region: KreaRegion,
     batch: int,
     device: torch.device,
     dtype: torch.dtype,
@@ -308,10 +361,10 @@ def _token_mask_for(
     rows: int | None = None,
     cols: int | None = None,
 ) -> torch.Tensor:
-    target_len = int(img_len or regional.region.img_len)
-    token_mask = regional.region.token_mask
+    target_len = int(img_len or region.img_len)
+    token_mask = region.token_mask
     if int(token_mask.shape[1]) != target_len:
-        token_mask = _resize_token_mask(regional, target_len, rows, cols)
+        token_mask = resize_region_token_mask(region, target_len, rows, cols)
     if token_mask.shape[0] == 1 and batch > 1:
         token_mask = token_mask.repeat(batch, 1, 1)
     elif token_mask.shape[0] != batch:
@@ -319,19 +372,58 @@ def _token_mask_for(
     return token_mask.to(device=device, dtype=dtype)
 
 
-def _resize_token_mask(regional: KreaRegionalLora, img_len: int, rows: int | None, cols: int | None) -> torch.Tensor:
+def resize_region_token_mask(region: KreaRegion, img_len: int, rows: int | None, cols: int | None) -> torch.Tensor:
     if rows is not None and cols is not None and int(rows) * int(cols) == int(img_len):
-        return F.interpolate(regional.region.pixel_mask.unsqueeze(1), size=(int(rows), int(cols)), mode="area").clamp(0.0, 1.0).flatten(2).transpose(1, 2)
-    mask = regional.region.token_mask.transpose(1, 2)
+        return F.interpolate(region.pixel_mask.unsqueeze(1), size=(int(rows), int(cols)), mode="area").clamp(0.0, 1.0).flatten(2).transpose(1, 2)
+    mask = region.token_mask.transpose(1, 2)
     return F.interpolate(mask, size=int(img_len), mode="linear", align_corners=False).clamp(0.0, 1.0).transpose(1, 2)
 
 
-def _combine_masks(existing: Any, bias: torch.Tensor) -> torch.Tensor:
+def mask_stats(mask: torch.Tensor, *, offset: int = 0) -> MaskStats:
+    m = mask.detach().float()
+    if m.numel() == 0:
+        return MaskStats(tuple(mask.shape), None, 0.0, 0.0, 0.0, 0.0)
+    nonzero = torch.nonzero(m > 0, as_tuple=False)
+    if nonzero.numel() == 0:
+        nonzero_range = None
+    else:
+        positions = nonzero[:, -1]
+        nonzero_range = (offset + int(positions.min().cpu()), offset + int(positions.max().cpu()))
+    return MaskStats(
+        tuple(mask.shape),
+        nonzero_range,
+        float(m.min().cpu()),
+        float(m.max().cpu()),
+        float(m.mean().cpu()),
+        float(m.sum().cpu()),
+    )
+
+
+def combine_attention_masks(existing: Any, bias: torch.Tensor) -> torch.Tensor:
     if existing is None:
         return bias
     if not torch.is_tensor(existing):
         return bias
     return existing.to(device=bias.device, dtype=bias.dtype) + bias
+
+
+def expand_bias_to_heads(bias: torch.Tensor, heads: int) -> torch.Tensor:
+    batch, q_len, k_len = bias.shape
+    h = max(1, int(heads))
+    return bias[:, None, :, :].repeat(1, h, 1, 1).reshape(batch * h, q_len, k_len)
+
+
+def attention_backend_name(func: Any) -> str:
+    module = getattr(func, "__module__", "")
+    name = getattr(func, "__name__", type(func).__name__)
+    return f"{module}.{name}" if module else str(name)
+
+
+def additive_bias_supported(func: Any) -> bool:
+    name = getattr(func, "__name__", "")
+    if name in {"attention_flash", "attention3_sage"}:
+        return False
+    return True
 
 
 def _fit_batch(flags: torch.Tensor, batch: int) -> torch.Tensor:
@@ -342,9 +434,17 @@ def _fit_batch(flags: torch.Tensor, batch: int) -> torch.Tensor:
     return flags[:1].repeat(batch, 1)
 
 
+def _mode_strength(mode: str, strength: float) -> float:
+    if mode == "none":
+        return 0.0
+    if mode == "forbid":
+        return FORBID_BIAS
+    return max(0.0, float(strength))
+
+
 def _cross_strength(stack: KreaRegionalLoraStack) -> float:
     if stack.cross_lora_mode == "allow":
         return 0.0
     if stack.cross_lora_mode == "block":
-        return 10000.0
+        return FORBID_BIAS
     return max(0.0, float(stack.cross_lora_strength))

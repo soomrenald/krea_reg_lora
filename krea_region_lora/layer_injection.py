@@ -149,7 +149,9 @@ def build_layer_injection_model(
     report = InjectionReport()
     report.add(
         f"Regional delta tracking: target_policy={target_policy} eligible_linears={len(eligible)} "
-        f"outside_strength={outside_strength:.3f} text_token_strength={text_token_strength:.3f}"
+        f"outside_strength={outside_strength:.3f} text_token_strength={text_token_strength:.3f} "
+        f"attention_isolation_mode={stack.attention_isolation_mode} attention_isolation_strength={stack.attention_isolation_strength:.3f} "
+        f"modified_outward_mode={stack.modified_outward_mode} modified_outward_strength={stack.modified_outward_strength:.3f}"
     )
 
     patches_by_layer: dict[str, list[LayerLoRAPatch]] = {}
@@ -216,7 +218,7 @@ def build_layer_injection_model(
     _install_attention_override(model_out, state)
     report.add(f"Installed regional hooks on {len(patches_by_layer)} layers.")
     report.add("Krea2 token layout: masks use text_len:text_len+img_len; padded tokens remain outside.")
-    report.add("Installed optimized_attention_override for asymmetric modified-token masking.")
+    report.add("Installed optimized_attention_override for LoRA modified-token attention isolation.")
     return model_out, report.text()
 
 

@@ -1215,35 +1215,30 @@
         {
           "localized_name": "regional_lora_2",
           "name": "regional_lora_2",
-          "shape": 7,
           "type": "KREA_REGIONAL_LORA",
           "link": 18
         },
         {
           "localized_name": "regional_lora_3",
           "name": "regional_lora_3",
-          "shape": 7,
           "type": "KREA_REGIONAL_LORA",
           "link": null
         },
         {
           "localized_name": "regional_lora_4",
           "name": "regional_lora_4",
-          "shape": 7,
           "type": "KREA_REGIONAL_LORA",
           "link": null
         },
         {
           "localized_name": "regional_lora_5",
           "name": "regional_lora_5",
-          "shape": 7,
           "type": "KREA_REGIONAL_LORA",
           "link": null
         },
         {
           "localized_name": "regional_lora_6",
           "name": "regional_lora_6",
-          "shape": 7,
           "type": "KREA_REGIONAL_LORA",
           "link": null
         },
@@ -1251,37 +1246,64 @@
           "localized_name": "overlap_mode",
           "name": "overlap_mode",
           "type": "COMBO",
+          "link": null,
           "widget": {
             "name": "overlap_mode"
-          },
-          "link": null
+          }
+        },
+        {
+          "localized_name": "attention_isolation_mode",
+          "name": "attention_isolation_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "attention_isolation_mode"
+          }
         },
         {
           "localized_name": "attention_isolation_strength",
           "name": "attention_isolation_strength",
           "type": "FLOAT",
+          "link": null,
           "widget": {
             "name": "attention_isolation_strength"
-          },
-          "link": null
+          }
+        },
+        {
+          "localized_name": "modified_outward_mode",
+          "name": "modified_outward_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "modified_outward_mode"
+          }
+        },
+        {
+          "localized_name": "modified_outward_strength",
+          "name": "modified_outward_strength",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "modified_outward_strength"
+          }
         },
         {
           "localized_name": "cross_lora_mode",
           "name": "cross_lora_mode",
           "type": "COMBO",
+          "link": null,
           "widget": {
             "name": "cross_lora_mode"
-          },
-          "link": null
+          }
         },
         {
           "localized_name": "cross_lora_strength",
           "name": "cross_lora_strength",
           "type": "FLOAT",
+          "link": null,
           "widget": {
             "name": "cross_lora_strength"
-          },
-          "link": null
+          }
         }
       ],
       "outputs": [
@@ -1300,7 +1322,10 @@
       },
       "widgets_values": [
         "normalize",
+        "penalize",
         5,
+        "none",
+        5.0,
         "penalize",
         3
       ]
@@ -1835,6 +1860,24 @@
             "name": "feather"
           },
           "link": null
+        },
+        {
+          "localized_name": "prompt_attention_mode",
+          "name": "prompt_attention_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "prompt_attention_mode"
+          }
+        },
+        {
+          "localized_name": "prompt_attention_strength",
+          "name": "prompt_attention_strength",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "prompt_attention_strength"
+          }
         }
       ],
       "outputs": [
@@ -1854,7 +1897,9 @@
         "woman on the left, Lface, detailed eyes, natural skin texture, translucent white sundress, stays inside left bbox",
         1.0,
         0.0,
-        -1
+        -1,
+        "forbid",
+        5.0
       ],
       "title": "Regional Prompt 1: same KREA_REGION as LoRA 1",
       "color": "#334466"
@@ -1921,6 +1966,24 @@
             "name": "feather"
           },
           "link": null
+        },
+        {
+          "localized_name": "prompt_attention_mode",
+          "name": "prompt_attention_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "prompt_attention_mode"
+          }
+        },
+        {
+          "localized_name": "prompt_attention_strength",
+          "name": "prompt_attention_strength",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "prompt_attention_strength"
+          }
         }
       ],
       "outputs": [
@@ -1940,7 +2003,9 @@
         "man on the right, Sface, detailed eyes, natural skin texture, swim trunks, stays inside right bbox",
         1.0,
         0.0,
-        -1
+        -1,
+        "forbid",
+        5.0
       ],
       "title": "Regional Prompt 2: same KREA_REGION as LoRA 2",
       "color": "#334466"
@@ -2056,6 +2121,15 @@
           "link": 33
         },
         {
+          "localized_name": "conditioning_mode",
+          "name": "conditioning_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "conditioning_mode"
+          }
+        },
+        {
           "localized_name": "debug_logging",
           "name": "debug_logging",
           "type": "BOOLEAN",
@@ -2085,6 +2159,7 @@
         "Node name for S&R": "KreaRegionalConditioningApply"
       },
       "widgets_values": [
+        "transformer_attention_bias",
         false
       ],
       "title": "1. Apply Regional Prompt Conditioning",

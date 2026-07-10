@@ -102,6 +102,8 @@ class KreaRegionalPrompt:
                 "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
                 "outside_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "feather": ("INT", {"default": -1, "min": -1, "max": 2048, "step": 1}),
+                "prompt_attention_mode": (["none", "penalize", "forbid"], {"default": "forbid"}),
+                "prompt_attention_strength": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 10000.0, "step": 0.1}),
             }
         }
 
@@ -110,8 +112,19 @@ class KreaRegionalPrompt:
     FUNCTION = "encode"
     CATEGORY = "Krea/Regional LoRA"
 
-    def encode(self, region, clip, text, strength=1.0, outside_strength=0.0, feather=-1):
-        return (encode_regional_conditioning(clip, region, text, float(strength), float(outside_strength), int(feather)),)
+    def encode(self, region, clip, text, strength=1.0, outside_strength=0.0, feather=-1, prompt_attention_mode="forbid", prompt_attention_strength=5.0):
+        return (
+            encode_regional_conditioning(
+                clip,
+                region,
+                text,
+                float(strength),
+                float(outside_strength),
+                int(feather),
+                prompt_attention_mode,
+                float(prompt_attention_strength),
+            ),
+        )
 
 
 class KreaRegionalConditioningStack:
@@ -159,6 +172,7 @@ class KreaRegionalConditioningApply:
             "required": {
                 "model": ("MODEL",),
                 "regional_conditioning_stack": ("KREA_REGIONAL_CONDITIONING_STACK",),
+                "conditioning_mode": (["transformer_attention_bias", "sampler_delta_conditioning", "disabled"], {"default": "transformer_attention_bias"}),
                 "debug_logging": ("BOOLEAN", {"default": False}),
             }
         }
@@ -168,8 +182,13 @@ class KreaRegionalConditioningApply:
     FUNCTION = "apply"
     CATEGORY = "Krea/Regional LoRA"
 
-    def apply(self, model, regional_conditioning_stack, debug_logging=False):
-        return build_regional_conditioning_model(model, regional_conditioning_stack, debug=bool(debug_logging))
+    def apply(self, model, regional_conditioning_stack, conditioning_mode="transformer_attention_bias", debug_logging=False):
+        return build_regional_conditioning_model(
+            model,
+            regional_conditioning_stack,
+            conditioning_mode=conditioning_mode,
+            debug=bool(debug_logging),
+        )
 
 
 class KreaRegionalConditioningDebug:
@@ -276,7 +295,10 @@ class KreaRegionalLoRAStack:
             "required": {
                 "regional_lora_1": ("KREA_REGIONAL_LORA",),
                 "overlap_mode": (["normalize", "priority_1", "priority_last", "add"], {"default": "normalize"}),
+                "attention_isolation_mode": (["none", "penalize", "forbid"], {"default": "penalize"}),
                 "attention_isolation_strength": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 10000.0, "step": 0.1}),
+                "modified_outward_mode": (["none", "penalize", "forbid"], {"default": "none"}),
+                "modified_outward_strength": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 10000.0, "step": 0.1}),
                 "cross_lora_mode": (["allow", "penalize", "block"], {"default": "penalize"}),
                 "cross_lora_strength": ("FLOAT", {"default": 3.0, "min": 0.0, "max": 10000.0, "step": 0.1}),
             },
@@ -294,7 +316,18 @@ class KreaRegionalLoRAStack:
     FUNCTION = "stack"
     CATEGORY = "Krea/Regional LoRA"
 
-    def stack(self, regional_lora_1, overlap_mode="normalize", attention_isolation_strength=5.0, cross_lora_mode="penalize", cross_lora_strength=3.0, **kwargs):
+    def stack(
+        self,
+        regional_lora_1,
+        overlap_mode="normalize",
+        attention_isolation_mode="penalize",
+        attention_isolation_strength=5.0,
+        modified_outward_mode="none",
+        modified_outward_strength=5.0,
+        cross_lora_mode="penalize",
+        cross_lora_strength=3.0,
+        **kwargs,
+    ):
         regions = [regional_lora_1]
         for key in ("regional_lora_2", "regional_lora_3", "regional_lora_4", "regional_lora_5", "regional_lora_6"):
             value = kwargs.get(key)
@@ -304,7 +337,10 @@ class KreaRegionalLoRAStack:
             KreaRegionalLoraStack(
                 regions=tuple(regions),
                 overlap_mode=overlap_mode,
+                attention_isolation_mode=attention_isolation_mode,
                 attention_isolation_strength=float(attention_isolation_strength),
+                modified_outward_mode=modified_outward_mode,
+                modified_outward_strength=float(modified_outward_strength),
                 cross_lora_mode=cross_lora_mode,
                 cross_lora_strength=float(cross_lora_strength),
             ),
@@ -353,7 +389,8 @@ class KreaRegionalLoRADebug:
     def debug(self, regional_lora_stack):
         lines = [
             f"regions={len(regional_lora_stack.regions)} enabled={len(regional_lora_stack.enabled_regions)}",
-            f"attention_isolation_strength={regional_lora_stack.attention_isolation_strength}",
+            f"attention_isolation_mode={regional_lora_stack.attention_isolation_mode} attention_isolation_strength={regional_lora_stack.attention_isolation_strength}",
+            f"modified_outward_mode={regional_lora_stack.modified_outward_mode} modified_outward_strength={regional_lora_stack.modified_outward_strength}",
             f"cross_lora_mode={regional_lora_stack.cross_lora_mode}",
         ]
         for i, regional in enumerate(regional_lora_stack.regions, start=1):

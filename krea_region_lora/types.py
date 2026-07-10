@@ -9,12 +9,15 @@ import torch.nn.functional as F
 
 BBoxFormat = Literal["xywh", "xyxy"]
 BatchMode = Literal["single", "repeat", "per_batch"]
+ConditioningMode = Literal["transformer_attention_bias", "sampler_delta_conditioning", "disabled"]
 CrossLoraMode = Literal["allow", "penalize", "block"]
+IsolationMode = Literal["none", "penalize", "forbid"]
 LayerTargetPolicy = Literal["attn_out_mlp", "attention_only", "all_matched_linears"]
-MeasurementSource = Literal["direct_delta", "hidden_state_delta"]
-MEASUREMENT_SOURCE_OPTIONS = ["direct_delta", "hidden_state_delta"]
+MeasurementSource = Literal["direct_delta", "hidden_state_delta", "final_prediction_delta"]
+MEASUREMENT_SOURCE_OPTIONS = ["direct_delta", "hidden_state_delta", "final_prediction_delta"]
 NormalizationMode = Literal["relative_norm", "minmax", "percentile", "raw"]
 OverlapMode = Literal["normalize", "priority_1", "priority_last", "add"]
+PromptAttentionMode = Literal["none", "penalize", "forbid"]
 RetentionMode = Literal["sticky", "decay", "instant"]
 
 
@@ -84,7 +87,10 @@ class KreaRegionalLora:
 class KreaRegionalLoraStack:
     regions: tuple[KreaRegionalLora, ...]
     overlap_mode: OverlapMode = "normalize"
+    attention_isolation_mode: IsolationMode = "penalize"
     attention_isolation_strength: float = 5.0
+    modified_outward_mode: IsolationMode = "none"
+    modified_outward_strength: float = 5.0
     cross_lora_mode: CrossLoraMode = "penalize"
     cross_lora_strength: float = 3.0
 
@@ -98,8 +104,12 @@ class KreaRegionalConditioning:
     region: KreaRegion
     conditioning: Any
     text: str
+    region_id: str | None = None
+    token_range_metadata: tuple[int, int] | None = None
     strength: float = 1.0
     outside_strength: float = 0.0
+    prompt_attention_mode: PromptAttentionMode = "forbid"
+    prompt_attention_strength: float = 5.0
     feather_px: int | None = None
 
 
@@ -120,6 +130,8 @@ def parse_measurement_sources(value: str | tuple[str, ...] | list[str]) -> tuple
             out.append("direct_delta")
         elif item in ("hidden", "hidden_delta", "hidden_state", "hidden_state_delta", "state_delta"):
             out.append("hidden_state_delta")
+        elif item in ("final", "final_prediction", "final_prediction_delta", "prediction_delta"):
+            out.append("final_prediction_delta")
     return tuple(dict.fromkeys(out)) or ("direct_delta",)
 
 
